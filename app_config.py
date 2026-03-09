@@ -252,8 +252,12 @@ def _active_api_key():
 
 def _google_api_url(stream=False):
     model = quote(MODEL_NAME, safe="")
-    method = "streamGenerateContent?alt=sse" if stream else "generateContent"
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={GOOGLE_API_KEY}"
+    method = "streamGenerateContent" if stream else "generateContent"
+    if stream:
+        query = f"alt=sse&key={GOOGLE_API_KEY}"
+    else:
+        query = f"key={GOOGLE_API_KEY}"
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?{query}"
 
 
 def _extract_google_text(data):
