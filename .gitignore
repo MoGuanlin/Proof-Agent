@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 logs/
 research_output_*.md.env
+research_output_*.md
+__pycache__/
+research_output_*.md
+__pycache__/
