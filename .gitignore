@@ -1,0 +1,7 @@
+env/
+.env
+.cache/
+__pycache__/
+*.pyc
+logs/
+research_output_*.md.env

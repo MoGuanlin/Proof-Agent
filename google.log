@@ -1,0 +1,19 @@
+nohup: ignoring input
+🚀 启动配置: provider=google, model=gemini-3.1-pro-preview, stream=0, timeout=3000s, literature_max_chars=0
+📦 [Step 2/5] 命中解析缓存: .cache/markitdown/1103.4361v2.bcd225c6a60c.marker.2e7752ae20.md
+🎨 [Step 1/5] Prompt Architect 正在为该课题定制专家指令集...
+[Prompt Architect] calling provider=google model=gemini-3.1-pro-preview stream=0 timeout=3000s attempt=1/3
+[Prompt Architect] retry 2/3 because: ProxyError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyAljRnCpdd3827VYIfMWQ2Q9yjOrcKrkIo (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected('Remote end closed connection without response')))
+[Prompt Architect] calling provider=google model=gemini-3.1-pro-preview stream=0 timeout=3000s attempt=2/3
+[Prompt Architect] retry 3/3 because: ProxyError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyAljRnCpdd3827VYIfMWQ2Q9yjOrcKrkIo (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected('Remote end closed connection without response')))
+[Prompt Architect] calling provider=google model=gemini-3.1-pro-preview stream=0 timeout=3000s attempt=3/3
+Traceback (most recent call last):
+  File "/data2/chengkangke/proof_agent/main.py", line 1527, in <module>
+    final_report = system.execute(PDF_FILE, TARGET_GOAL)
+  File "/data2/chengkangke/proof_agent/main.py", line 1380, in execute
+    self._customize_team(goal, literature_context)
+  File "/data2/chengkangke/proof_agent/main.py", line 1180, in _customize_team
+    final_prompt = architect.call_llm_tagged(
+  File "/data2/chengkangke/proof_agent/main.py", line 664, in call_llm_tagged
+    raise RuntimeError(last_raw)
+RuntimeError: [Prompt Architect] API Error: ProxyError (HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyAljRnCpdd3827VYIfMWQ2Q9yjOrcKrkIo (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected('Remote end closed connection without response')))). 请检查代理是否已启动或可访问，例如: http://127.0.0.1:7890

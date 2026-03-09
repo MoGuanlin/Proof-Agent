@@ -1,0 +1,6 @@
+🚀 启动配置: provider=siliconflow, model=Qwen/Qwen3.5-397B-A17B, stream=0, timeout=3000s, literature_max_chars=0
+📦 [Step 2/5] 使用指定 Markdown 缓存: /home/ideve/proof_agent2/proof_agent2/.cache/markitdown/1103.4361v2.bcd225c6a60c.marker.2e7752ae20.md
+📦 [Step 1/5] 命中定制提示词缓存: customized_prompts.json
+✅ 专家团队角色已从缓存加载。
+🧠 [Step 3/6] PI 正在制定研究路径...
+[PI Brain] calling provider=siliconflow model=Qwen/Qwen3.5-397B-A17B stream=0 timeout=3000s attempt=1/10
