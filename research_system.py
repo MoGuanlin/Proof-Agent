@@ -588,9 +588,9 @@ class AutonomousResearchSystem:
             "要求：\n"
             "1) 指令必须显式引用当前草稿中的关键对象/符号/主张；\n"
             "2) 先给出一个简短的 Current Task Contract，总结本轮显式采用的定义、坐标系、独立变量和目标结论；\n"
-            "3) 给出 5-8 条高优先级检查项，每条都必须可执行、可判定；\n"
+            "3) 给出 5-8 条高优先级检查项，每条都必须可执行、可判定；其中必须至少有 1 条专门检查草稿是否把局部子任务过度上升为“已经证明最终全局定理”“最终上界已成立”或“完整证明闭环已完成”；\n"
             "4) 明确区分“致命问题（才可判 [REJECT]）”与“可修补问题（应给出修补建议但不自动 [REJECT]）”；\n"
-            "5) 若当前子任务只是局部参数化、偏导、引理或中间不等式，只评估该局部目标，不要求其独立证明最终全局定理或最终 rho 改进；\n"
+            "5) 若当前子任务只是局部参数化、偏导、引理或中间不等式，只评估该局部目标，不要求其独立证明最终全局定理或最终 rho 改进；但如果草稿主动声称已经完成最终全局证明，而任务验证项并未要求这一点，必须把它列为致命 overclaim；\n"
             "6) 不要复述整篇草稿，不要给出与当前草稿无关的泛化建议，不要使用 hostile/adversarial/brutal/merciless 等人格化措辞。\n\n"
             f"当前证明草稿:\n{draft_snippet}"
         )
@@ -598,7 +598,7 @@ class AutonomousResearchSystem:
             directive_prompt,
             tag_name="REVIEW_DIRECTIVE",
             content_hint="输出审查指令正文，不要外层解释。",
-            print_stream=False,
+            print_stream=True,
         )
         return directive.strip()
 
@@ -724,7 +724,8 @@ class AutonomousResearchSystem:
                 "## Boundary Cases\n"
                 "## Conclusion\n"
                 "若任务涉及重定义，请在 Assumptions 中明确写出“替代定义/新定义”。\n"
-                "Claim 和 Conclusion 只能陈述当前子任务直接建立的局部结果；若本轮只是参数化、偏导公式或中间引理，不得宣称已经证明最终全局 bound 或 rho 改进。\n"
+                "Claim 和 Conclusion 只能陈述当前子任务直接建立的局部结果；若本轮只是参数化、偏导公式或中间引理，不得宣称已经证明最终全局定理、最终全局上界或完整证明闭环。\n"
+                "除非当前任务的 verification 明确要求“证明最终全局上界/最终定理/完整证明闭环”，否则 Conclusion 末尾必须显式写一句：Scope: 本子任务仅建立局部结果，尚不足以单独证明最终全局定理。\n"
                 "如需改动坐标系、独立变量或函数依赖，必须在 Assumptions 中显式声明，并在 Derivation 中保持一致。",
                 tag_name="DERIVATION_DRAFT",
                 content_hint="必须包含 Assumptions/Symbol Table/Claim/Derivation/Boundary Cases/Conclusion 六节。",
@@ -747,7 +748,8 @@ class AutonomousResearchSystem:
                             f"修正反馈: {feedback}\n当前草稿: {draft}\n"
                             "请优先修复被指出的问题，并保持固定骨架。\n"
                             "若审稿意见表明当前结论过强，优先把 Claim 和 Conclusion 缩小到当前材料真正支持的局部结果，而不是强行保留原结论。\n"
-                            "除非本轮确实完成了全局证明，否则不要宣称最终 rho 改进或最终定理已经成立。\n"
+                            "除非本轮确实完成了完整证明闭环，否则不要宣称最终全局定理、最终全局上界或最终改进结论已经成立。\n"
+                            "如果当前任务 verification 没有要求最终全局定理，则 Conclusion 末尾必须显式写一句：Scope: 本子任务仅建立局部结果，尚不足以单独证明最终全局定理。\n"
                             "如需改动定义、坐标系或变量依赖，必须在 Assumptions 中显式声明，并同步修正后续推导。\n"
                             "禁止为了保住原结论而回避审稿意见。\n"
                             "保持以下固定骨架：\n"

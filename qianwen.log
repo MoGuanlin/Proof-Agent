@@ -4,3 +4,5 @@
 ✅ 专家团队角色已从缓存加载。
 🧠 [Step 3/6] PI 正在制定研究路径...
 [PI Brain] calling provider=siliconflow model=Qwen/Qwen3.5-397B-A17B stream=0 timeout=3000s attempt=1/10
+[PI Brain] retry 2/10 because: timeout (3000s)
+[PI Brain] calling provider=siliconflow model=Qwen/Qwen3.5-397B-A17B stream=0 timeout=3000s attempt=2/10
