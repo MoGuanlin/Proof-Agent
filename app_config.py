@@ -5,29 +5,23 @@ from urllib.parse import quote
 
 
 def _load_dotenv_file(path=".env", override=True):
-    """轻量读取 .env；默认覆盖同名环境变量，避免继承旧值。"""
     if not os.path.exists(path):
         return
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export ") :].strip()
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip("'").strip('"')
-                if key:
-                    if override or key not in os.environ:
-                        os.environ[key] = value
-    except Exception:
-        # .env 读取失败时保持静默，继续走系统环境变量
-        pass
+    with open(path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and (override or key not in os.environ):
+                os.environ[key] = value
 
 
 _dotenv_override = str(os.getenv("DOTENV_OVERRIDE", "1")).strip().lower() in {"1", "true", "yes", "on"}
@@ -45,10 +39,12 @@ def _env_int(name, default):
     val = os.getenv(name)
     if val is None:
         return int(default)
-    try:
-        return int(str(val).strip())
-    except Exception:
-        return int(default)
+    return int(str(val).strip())
+
+
+def _env_csv(name, default=""):
+    raw = os.getenv(name, default)
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
 
 
 def _request_proxies():
@@ -67,18 +63,6 @@ def _request_proxies():
     if not http_proxy and not https_proxy:
         return None
     return {"http": http_proxy, "https": https_proxy}
-
-
-def _proxy_hint():
-    return (
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("http_proxy")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("all_proxy")
-        or "127.0.0.1:7890"
-    )
 
 
 def _normalize_provider(name):
@@ -117,11 +101,21 @@ MODEL_NAME = os.getenv(
     ),
 ).strip()
 REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 3000)
-LLM_MAX_ATTEMPTS = max(1, _env_int("LLM_MAX_ATTEMPTS", 3))
 PREFER_STREAMING = _env_flag("PREFER_STREAMING", default=True)
-REUSE_CUSTOM_PROMPTS = _env_flag("REUSE_CUSTOM_PROMPTS", default=True)
 # <=0 表示不限制文献上下文长度
 LITERATURE_MAX_CHARS = _env_int("LITERATURE_MAX_CHARS", 0)
+LITERATURE_RAG_CHUNK_CHARS = _env_int("LITERATURE_RAG_CHUNK_CHARS", 1800)
+LITERATURE_RAG_OVERLAP_CHARS = _env_int("LITERATURE_RAG_OVERLAP_CHARS", 240)
+LITERATURE_RAG_TOP_K = _env_int("LITERATURE_RAG_TOP_K", 4)
+LITERATURE_RAG_MAX_CHARS = _env_int("LITERATURE_RAG_MAX_CHARS", 5000)
+LITERATURE_RAG_SUMMARY_CHARS = _env_int("LITERATURE_RAG_SUMMARY_CHARS", 2500)
+LITERATURE_RAG_DB_FILE = os.getenv("LITERATURE_RAG_DB_FILE", ".cache/literature_rag.sqlite").strip()
+LITERATURE_RAG_VECTOR_DIM = _env_int("LITERATURE_RAG_VECTOR_DIM", 768)
+LITERATURE_RAG_EMBEDDING_MODEL = os.getenv(
+    "LITERATURE_RAG_EMBEDDING_MODEL",
+    "sentence-transformers/all-MiniLM-L6-v2",
+).strip()
+LITERATURE_EXTRA_MARKDOWN_GLOBS = _env_csv("LITERATURE_EXTRA_MARKDOWN_GLOBS", "")
 # parser 固定为 marker-only
 PDF_PARSE_BACKEND = "marker"
 MARKER_FORCE_OCR = _env_flag("MARKER_FORCE_OCR", default=False)
@@ -130,12 +124,9 @@ MARKER_EXTRA_ARGS = shlex.split(os.getenv("MARKER_EXTRA_ARGS", "").strip())
 MARKER_TIMEOUT_SECONDS = _env_int("MARKER_TIMEOUT_SECONDS", 1800)
 MARKER_DISABLE_MULTIPROCESSING = _env_flag("MARKER_DISABLE_MULTIPROCESSING", default=True)
 MARKDOWN_CACHE_FILE = os.getenv("MARKDOWN_CACHE_FILE", "").strip()
-LLM_LOG_PATH = os.getenv("LLM_LOG_PATH", "logs/llm_outputs.jsonl").strip()
-LOG_LLM_IO = os.getenv("LOG_LLM_IO", "1").strip() != "0"
-try:
-    LLM_LOG_MAX_CHARS = int(os.getenv("LLM_LOG_MAX_CHARS", "400000"))
-except Exception:
-    LLM_LOG_MAX_CHARS = 400000
+CANDIDATE_MEMORY_FILE = os.getenv("CANDIDATE_MEMORY_FILE", ".cache/candidate_memory.sqlite").strip()
+CANDIDATE_MAX_COUNT = _env_int("CANDIDATE_MAX_COUNT", 5)
+PROOF_REFINEMENT_MAX_ROUNDS = _env_int("PROOF_REFINEMENT_MAX_ROUNDS", 2)
 
 
 REVIEWER_ROLE_OVERRIDES = {
@@ -230,18 +221,34 @@ Do not output anything outside the tag.
 }
 
 
-def _apply_reviewer_prompt_overrides(data):
-    if not isinstance(data, dict):
-        return data, False
-    merged = dict(data)
-    changed = False
-    for name, prompt in REVIEWER_ROLE_OVERRIDES.items():
-        if merged.get(name) != prompt:
-            merged[name] = prompt
-            changed = True
-    return merged, changed
+AUXILIARY_ROLE_OVERRIDES = {
+    "Domain Surveyor": """
+You are the Domain Surveyor for mathematical research planning in computational geometry.
 
+Scope:
+- You are not a reviewer and you do not issue verdicts.
+- Diagnose bottlenecks, dependency risks, hidden assumptions, and open questions for the current task only.
+- Use the paper's notation faithfully, but focus on where the current task is likely to fail or need extra support.
 
+Output policy:
+- Do not output [PASS], [REJECT], [ACCEPT], [REVISE], Final Decision, Conclusion Label, or Reviewer Verification.
+- Do not act like a judge; act like a technical scout.
+- Prefer concise, structured notes that help the next agent decide what to prove or repair.
+""".strip(),
+    "Cross-Domain Grafter": """
+You are the Cross-Domain Grafter for mathematical research planning in computational geometry.
+
+Scope:
+- You are not a reviewer and you do not issue verdicts.
+- Propose usable tools, analogies, or proof templates that can be mapped onto the current task.
+- Be explicit about preconditions, failure modes, and what must already be true for the proposed method to work.
+
+Output policy:
+- Do not output [PASS], [REJECT], [ACCEPT], [REVISE], Final Decision, Conclusion Label, or Reviewer Verification.
+- Do not grade the draft; provide candidate methods and the tradeoffs of using them.
+- Keep the advice actionable and task-specific.
+""".strip(),
+}
 def _active_api_key():
     if LLM_PROVIDER == "google":
         return GOOGLE_API_KEY
@@ -302,7 +309,4 @@ def _sanitize_filename_component(text, max_len=48):
 
 
 def _fmt_temp(v):
-    try:
-        return f"{float(v):g}"
-    except Exception:
-        return "na"
+    return f"{float(v):g}"
