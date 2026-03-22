@@ -9,7 +9,7 @@ research_output_*.md
 __pycache__/
 research_output_*.md
 __pycache__/
-
+cite_file/
 .venv/
 *.log
 *.pid

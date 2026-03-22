@@ -257,6 +257,39 @@ class BaseAgent:
 
 class ReviewerAgent(BaseAgent):
     @staticmethod
+    def _contains_fatal_issue_language(text):
+        normalized = str(text or "").lower()
+        fatal_markers = (
+            "致命问题",
+            "致命缺陷",
+            "致命错误",
+            "致命逻辑缺陷",
+            "fatal issue",
+            "fatal issues",
+            "fatal flaw",
+            "fatal flaws",
+            "fatal error",
+            "可直接判 [reject]",
+            "可直接判[reject]",
+        )
+        return any(marker in normalized for marker in fatal_markers)
+
+    @staticmethod
+    def _force_reject_format(text):
+        normalized = str(text or "").strip()
+        if not normalized:
+            return "[REJECT]\n致命问题已触发硬拒绝，但 reviewer 未返回可解析内容。"
+        if re.match(r"(?im)^\s*\[pass\]\s*$", normalized):
+            return re.sub(r"(?im)^\s*\[pass\]\s*$", "[REJECT]", normalized, count=1)
+        lines = normalized.splitlines()
+        if lines:
+            first = lines[0].strip()
+            if re.match(r"(?i)^\[(pass|reject)\]$", first):
+                lines[0] = "[REJECT]"
+                return "\n".join(lines)
+        return f"[REJECT]\n{normalized}"
+
+    @staticmethod
     def _extract_verdict(text):
         if not isinstance(text, str):
             return None
@@ -305,6 +338,7 @@ class ReviewerAgent(BaseAgent):
             "3) 原论文默认定义与符号习惯（仅在不冲突时参考）。\n"
             "请在 <REVIEW_RESULT> 标签内输出评审结论。\n"
             "标签内第一行必须且只能是 [PASS] 或 [REJECT]。\n"
+            "若你在后续内容中写出“致命问题”“致命缺陷”“fatal issue”“fatal flaw”等表述，第一行必须是 [REJECT]；若第一行是 [PASS]，后续只能给非致命修补建议。\n"
             "若为 [PASS]，可在后续行列出非致命修补建议；若为 [REJECT]，只能列出致命问题与可执行修复步骤。\n"
         )
         result = self.call_llm_tagged(
@@ -315,6 +349,9 @@ class ReviewerAgent(BaseAgent):
         verdict = self._extract_verdict(result)
         if verdict is None:
             raise RuntimeError(f"[{self.name}] unable to parse reviewer verdict")
+        if verdict and self._contains_fatal_issue_language(result):
+            result = self._force_reject_format(result)
+            verdict = False
         return verdict, result
 
 orchestrator = BaseAgent("PI Brain", "课题组负责人，负责宏观任务拆解。")

@@ -1,7 +1,15 @@
 import hashlib
 from datetime import datetime
 
-from agents import architect, generator, global_rev, logic_rev, orchestrator, syntax_rev
+from agents import (
+    correctness_checker,
+    global_rev,
+    logic_rev,
+    orchestrator,
+    potential_designer,
+    proof_planner,
+    proof_writer,
+)
 from app_config import (
     MODEL_NAME,
     PDF_PARSE_BACKEND,
@@ -23,10 +31,11 @@ def _build_report_filename(goal_text):
     backend_short = _sanitize_filename_component(PDF_PARSE_BACKEND, max_len=16)
 
     temps_token = (
-        f"arch{_fmt_temp(architect.temp)}_"
+        f"pot{_fmt_temp(potential_designer.temp)}_"
         f"pi{_fmt_temp(orchestrator.temp)}_"
-        f"gen{_fmt_temp(generator.temp)}_"
-        f"rev{_fmt_temp(syntax_rev.temp)}-{_fmt_temp(logic_rev.temp)}-{_fmt_temp(global_rev.temp)}"
+        f"plan{_fmt_temp(proof_planner.temp)}_"
+        f"write{_fmt_temp(proof_writer.temp)}_"
+        f"rev{_fmt_temp(correctness_checker.temp)}-{_fmt_temp(logic_rev.temp)}-{_fmt_temp(global_rev.temp)}"
     )
     temps_short = _sanitize_filename_component(temps_token, max_len=52)
     stream_token = f"stream{1 if PREFER_STREAMING else 0}"
