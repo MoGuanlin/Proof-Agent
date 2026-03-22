@@ -499,6 +499,16 @@ class AutonomousResearchSystem:
         return match.group(1).strip() if match else ""
 
     @staticmethod
+    def _replace_markdown_section(md_text, section_title, new_body):
+        text = str(md_text or "")
+        replacement = f"## {section_title}\n{str(new_body or '').strip()}\n"
+        pattern = rf"(?ims)^##\s*{re.escape(section_title)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
+        if re.search(pattern, text):
+            return re.sub(pattern, replacement, text, count=1)
+        suffix = "\n\n" if text.strip() else ""
+        return f"{text.rstrip()}{suffix}{replacement}".strip()
+
+    @staticmethod
     def _strip_tool_reports(md_text):
         text = str(md_text or "").strip()
         if not text:
@@ -659,6 +669,12 @@ class AutonomousResearchSystem:
         claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=1200) or "[缺失]"
         derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=1800) or "[缺失]"
         conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=1200) or "[缺失]"
+        q6_contract = ""
+        if "q6" in str(context or "").lower():
+            q6_contract = (
+                "8) 若 Q6 草稿声称“可压到 1.98”“支持 rho < 1.98”或其他全局上界改进，"
+                "必须检查 Derivation 是否真的写出了明确常数链条；若没有，视为致命 overclaim 并判 [REJECT]。\n"
+            )
         directive = (
             f"阶段: {stage_label}\n"
             f"审稿人: {reviewer_name}\n"
@@ -675,6 +691,7 @@ class AutonomousResearchSystem:
             "5) 若当前任务只是局部性质、参数化、偏导或中间不等式，不得要求其独立完成最终全局定理。\n"
             "6) 若草稿主动宣称最终全局定理、最终上界或完整证明闭环已经完成，而上下文并未要求该强度，视为致命 overclaim。\n"
             "7) 若 Derivation 已明确声明替代定义或重参数化，只要后续自洽，不得仅因不同于原文习惯而驳回。\n"
+            f"{q6_contract}"
             f"Derivation 摘录:\n{derivation}\n"
         )
         return self._sanitize_reviewer_directive(directive)
@@ -743,7 +760,10 @@ class AutonomousResearchSystem:
             ),
             "Q6": (
                 "Q6 合同: 必须围绕极端链/极端配置给出下界分析，不要把一般情形直觉误当成极端链结论。"
-                "应直接给出极端链下界的数学论证，并明确最危险的边界配置；Q6 默认由大模型 reviewer 做逻辑审查，不要求生成工具验证协议。"
+                "应直接给出极端链下界的数学论证，并明确最危险的边界配置。"
+                "若没有写出明确常数链条（新常数如何进入下界比例、Lemma 3 型估计、以及与 rho/lambda 的关系），"
+                "不得声称“可压到 1.98”“支持 rho < 1.98”或“允许更小全局上界”；此时 Conclusion 只能写候选方向或局部约束。"
+                "Q6 默认由大模型 reviewer 做逻辑审查，不要求生成工具验证协议。"
             ),
         }
         return guidance.get(property_name, "")
@@ -760,15 +780,93 @@ class AutonomousResearchSystem:
             "na",
             "无需验证",
             "无需额外验证",
+            "不需要额外验证",
+            "无需额外的数值或符号验证",
+            "无需额外数值或符号验证",
+            "无需数值或符号验证",
+            "无需进一步数值或符号验证",
             "无额外验证",
+            "无",
+            "无。",
             "无进一步验证",
             "已闭合",
             "已验证完毕",
             "nofurtherverification",
             "noadditionalverification",
+            "noadditionalnumericalorsymbolicverification",
             "closed",
         )
         return any(marker in normalized for marker in closed_markers)
+
+    def _normalize_verification_needs_section(self, draft):
+        text = str(draft or "").strip()
+        if not text:
+            return ""
+        section = self._extract_markdown_section(text, "Verification Needs")
+        if self._verification_needs_closed(section):
+            return self._replace_markdown_section(text, "Verification Needs", "None")
+
+        cleaned_lines = []
+        for raw_line in str(section or "").splitlines():
+            line = str(raw_line).strip()
+            if not line:
+                continue
+            line = re.sub(r"^(?:[-*•]+|\d+[.)])\s*", "", line).strip()
+            if not line:
+                continue
+            cleaned_lines.append(f"- {line}")
+        normalized_body = "\n".join(cleaned_lines) if cleaned_lines else "None"
+        return self._replace_markdown_section(text, "Verification Needs", normalized_body)
+
+    def _q6_constant_chain_feedback(self, draft):
+        claim = self._extract_markdown_section(draft, "Claim")
+        conclusion = self._extract_markdown_section(draft, "Conclusion")
+        claim_zone = f"{claim}\n{conclusion}".strip()
+        normalized_claim = re.sub(r"\s+", " ", claim_zone.lower())
+        overclaim_markers = (
+            "1.98",
+            "rho < 1.98",
+            "rho<1.98",
+            "压到 1.98",
+            "压到1.98",
+            "可压到 1.98",
+            "可压到1.98",
+            "支持 rho < 1.98",
+            "支持rho<1.98",
+            "更小全局上界",
+            "global upper bound",
+            "smaller upper bound",
+        )
+        if not any(marker in normalized_claim for marker in overclaim_markers):
+            return ""
+
+        derivation = self._extract_markdown_section(draft, "Derivation")
+        boundary = self._extract_markdown_section(draft, "Boundary Cases")
+        support_zone = re.sub(r"\s+", " ", f"{derivation}\n{boundary}".lower())
+        support_markers = (
+            "lemma 3",
+            "lemma3",
+            "引理 3",
+            "引理3",
+            "rho",
+            "lambda",
+            "常数链",
+            "下界常数",
+            "lower bound constant",
+            "lower-bound constant",
+            "extreme chain",
+            "极端链",
+        )
+        support_hits = sum(1 for marker in support_markers if marker in support_zone)
+        if support_hits >= 4:
+            return ""
+        return (
+            "[REJECT]\n"
+            "致命问题: 当前 Q6 草稿在 Claim/Conclusion 中声称“可压到 1.98”或等价的全局上界改进，"
+            "但 Derivation/Boundary Cases 没有写出足够明确的常数链条，无法说明新常数如何进入极端链下界、"
+            "Lemma 3 型估计以及 rho/lambda 关系。\n"
+            "修复要求: 删除该全局改进结论，或补出完整常数链条后再声称 1.98 / rho < 1.98。"
+        )
 
     def _record_terminal_candidate(self, candidate, bucket):
         terminal_report = self._build_terminal_candidate_report(candidate)
@@ -870,7 +968,7 @@ class AutonomousResearchSystem:
                     prompt,
                     tag_name="POST_TERMINAL_DECISION",
                     content_hint="标签内必须是合法 JSON 对象。",
-                    print_stream=False,
+                    print_stream=True,
                 )
             )
         except Exception as exc:
@@ -927,7 +1025,7 @@ class AutonomousResearchSystem:
             prompt,
             tag_name="DIRECTION",
             content_hint="输出简洁、具体的下一轮设计方向。",
-            print_stream=False,
+            print_stream=True,
         ).strip()
 
     def _design_candidate(self, goal, literature_context, direction, candidate_index):
@@ -1270,7 +1368,7 @@ class AutonomousResearchSystem:
                     prompt,
                     tag_name="LOCAL_PLANNER_DECISION",
                     content_hint="标签内必须是合法 JSON 对象。",
-                    print_stream=False,
+                    print_stream=True,
                 )
             )
         except Exception as exc:
@@ -1530,7 +1628,7 @@ class AutonomousResearchSystem:
                     prompt,
                     tag_name="TOOL_REQUESTS",
                     content_hint="标签内必须是合法 JSON 数组。",
-                    print_stream=False,
+                    print_stream=True,
                 )
             )
         except Exception as exc:
@@ -1787,13 +1885,17 @@ class AutonomousResearchSystem:
             "要求：\n"
             "1) 只能证明当前 proposition，不得一次性声称整个性质或全局上界已经完成；\n"
             "2) 若 proposition 依赖更早的 proposition，只能把这些依赖当作已通过的局部前提，不得跳过新的关键步骤；\n"
-            "3) 若 Requires Tool=yes，必须明确区分已证明部分与仍需数值验证的部分。"
+            "3) 若 Requires Tool=yes，必须明确区分已证明部分与仍需数值验证的部分。\n"
+            "4) `## Verification Needs` 必须使用严格标准格式：若当前 proposition 已闭合，唯一允许内容是 `None`；"
+            "若仍有未闭合验证项，只能逐行输出 `- ...` 列表，不得写自然语言段落，不得写“无需额外的数值或符号验证”这类句子。\n"
+            f"{'5) Q6 额外硬约束: 若没有写出明确常数链条（新常数如何进入极端链下界、Lemma 3 型估计以及 rho/lambda 关系），不得声称“可压到 1.98”“支持 rho < 1.98”或“允许更小全局上界”；未闭合时 Conclusion 只能写候选方向或局部约束。' if property_name == 'Q6' else ''}"
         )
         draft = proof_writer.call_llm_tagged(
             prompt_base,
             tag_name="PROPOSITION_PROOF",
             content_hint="必须包含 Assumptions/Claim/Derivation/Boundary Cases/Verification Needs/Conclusion 六节。",
         )
+        draft = self._normalize_verification_needs_section(draft)
 
         draft, tool_reports, tool_certified = self._apply_proposition_tool_requests(
             candidate,
@@ -1806,6 +1908,7 @@ class AutonomousResearchSystem:
             property_guidance,
             proposition_meta,
         )
+        draft = self._normalize_verification_needs_section(draft)
         if candidate.status == "pruned":
             return False, "", False
         if property_name == "Q5" and requires_tool and not tool_certified:
@@ -1837,6 +1940,58 @@ class AutonomousResearchSystem:
         final_feedback = ""
         for attempt in range(max(1, int(PROPOSITION_REVIEW_MAX_ROUNDS or 1))):
             current_round_pass = True
+            if property_name == "Q6":
+                q6_feedback = self._q6_constant_chain_feedback(draft)
+                if q6_feedback:
+                    final_feedback = q6_feedback
+                    current_round_pass = False
+                    draft = proof_writer.call_llm_tagged(
+                        f"{prompt_base}\n\n当前草稿:\n{draft}\n\n修正反馈:\n{q6_feedback}\n\n"
+                        "请仅修复被指出的致命问题，保持六节骨架不变；若当前 proposition 结论过强，缩小到真正成立的范围。",
+                        tag_name="PROPOSITION_PROOF",
+                        content_hint="输出修订后的完整 proposition 草稿，并保留六节固定结构。",
+                    )
+                    draft = self._normalize_verification_needs_section(draft)
+                    draft, tool_reports, tool_certified = self._apply_proposition_tool_requests(
+                        candidate,
+                        property_name,
+                        proposition,
+                        goal,
+                        literature_context,
+                        draft,
+                        property_context,
+                        property_guidance,
+                        proposition_meta,
+                    )
+                    draft = self._normalize_verification_needs_section(draft)
+                    if candidate.status == "pruned":
+                        return False, "", False
+                    if property_name == "Q5" and requires_tool and not tool_certified:
+                        statuses = [
+                            str((item.get("report") or {}).get("status", "")).strip().lower() or "missing"
+                            for item in tool_reports
+                        ]
+                        reason = (
+                            f"Q5 proposition {proposition.get('id', '[missing]')} requires a verified numeric certificate, "
+                            f"but explicit tool requests produced statuses {statuses or ['missing']}"
+                        )
+                        candidate.mark_property(property_name, "fail", note=reason)
+                        candidate.mark_pruned(reason)
+                        candidate.mark_proposition(
+                            property_name,
+                            proposition.get("id", ""),
+                            "fail",
+                            note=reason,
+                            **proposition_meta,
+                        )
+                        candidate.append_log(
+                            "prune",
+                            "Q5 proposition blocked by missing/insufficient explicit tool certificate after Q6 revision",
+                            proposition_id=proposition.get("id", ""),
+                            statuses=statuses or ["missing"],
+                        )
+                        return False, "", False
+                    continue
             for reviewer in self.candidate_reviewers:
                 review_context = (
                     f"{property_context}\n"
@@ -1862,6 +2017,7 @@ class AutonomousResearchSystem:
                     tag_name="PROPOSITION_PROOF",
                     content_hint="输出修订后的完整 proposition 草稿，并保留六节固定结构。",
                 )
+                draft = self._normalize_verification_needs_section(draft)
                 draft, tool_reports, tool_certified = self._apply_proposition_tool_requests(
                     candidate,
                     property_name,
@@ -1873,6 +2029,7 @@ class AutonomousResearchSystem:
                     property_guidance,
                     proposition_meta,
                 )
+                draft = self._normalize_verification_needs_section(draft)
                 if candidate.status == "pruned":
                     return False, "", False
                 if property_name == "Q5" and requires_tool and not tool_certified:
@@ -2075,7 +2232,8 @@ class AutonomousResearchSystem:
             "2) 必须明确最脆弱的两个环节，尤其是 Q5 数值证书和 Q6 极端链下界之间的张力；\n"
             "3) 若某步仍需人工/额外验证，必须写进 Tight Spots 或 Next Actions；\n"
             "4) 不得声称最终全局上界已经完全确立，除非材料中已经明确支持；\n"
-            "5) <PROOF_REFINEMENT> 标签内只能放完整 Markdown 正文。"
+            "5) 若没有明确写出来自已通过 Q6 材料的常数链条，不得声称“可压到 1.98”“支持 rho < 1.98”或等价的全局上界改进；\n"
+            "6) <PROOF_REFINEMENT> 标签内只能放完整 Markdown 正文。"
         )
         draft = proof_writer.call_llm_tagged(
             prompt_base,
@@ -2084,7 +2242,7 @@ class AutonomousResearchSystem:
                 "必须包含 Candidate Statement/Property Map/Reusable Components/"
                 "Refined Proof Outline/Tight Spots/Next Actions 六节。"
             ),
-            print_stream=False,
+            print_stream=True,
         )
 
         final_feedback = ""
@@ -2113,7 +2271,7 @@ class AutonomousResearchSystem:
                     "请仅修复 reviewer 指出的致命问题，保持六节骨架不变，并明确哪些地方仍然只是候选证明包而非最终定理证明。",
                     tag_name="PROOF_REFINEMENT",
                     content_hint="输出修订后的完整 refinement 草稿，并保留六节固定结构。",
-                    print_stream=False,
+                    print_stream=True,
                 )
                 break
             if current_round_pass:
