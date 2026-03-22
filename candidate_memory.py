@@ -5,6 +5,15 @@ import sqlite3
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 
+from app_config import (
+    DISABLE_TEXT_TRUNCATION,
+    MEMORY_PROPERTY_PACKET_MAX_ITEMS,
+    MEMORY_REUSE_MAX_ITEMS,
+    MEMORY_SIMILAR_FAILURE_LIMIT,
+    MEMORY_SUMMARIZE_MAX_CANDIDATES,
+    MEMORY_TERMINAL_REPORT_MAX_ITEMS,
+)
+
 
 DEFAULT_PROPERTIES = ("N1", "N2", "N3", "D4", "Q5", "Q6")
 PROPERTY_DEPENDENCIES = {
@@ -301,6 +310,15 @@ class CandidateRecord:
 
 
 class MemoryManager:
+    @staticmethod
+    def _truncate_text(text, max_chars=0):
+        rendered = str(text or "").strip()
+        if DISABLE_TEXT_TRUNCATION:
+            return rendered
+        if max_chars > 0 and len(rendered) > max_chars:
+            return rendered[:max_chars]
+        return rendered
+
     def __init__(self, store_path):
         requested_path = os.path.abspath(store_path)
         root, ext = os.path.splitext(requested_path)
@@ -832,7 +850,7 @@ class MemoryManager:
             for row in rows
         ]
 
-    def find_similar_failures(self, form_text, limit=3, property_name=None):
+    def find_similar_failures(self, form_text, limit=MEMORY_SIMILAR_FAILURE_LIMIT, property_name=None):
         query = self._tokenize(form_text)
         scored = []
         for record in self.query_candidate_library(
@@ -975,7 +993,12 @@ class MemoryManager:
                 break
         return "\n".join(lines).strip()
 
-    def reusable_proposition_examples(self, property_name, form_text="", max_items=4):
+    def reusable_proposition_examples(
+        self,
+        property_name,
+        form_text="",
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+    ):
         prop = str(property_name or "").strip()
         if not prop:
             return []
@@ -1026,7 +1049,12 @@ class MemoryManager:
                 break
         return selected
 
-    def reusable_tool_request_examples(self, property_name, form_text="", max_items=4):
+    def reusable_tool_request_examples(
+        self,
+        property_name,
+        form_text="",
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+    ):
         prop = str(property_name or "").strip()
         if not prop:
             return []
@@ -1075,7 +1103,13 @@ class MemoryManager:
                 break
         return selected
 
-    def proposition_reuse_packet(self, property_name, form_text="", max_items=4, max_chars=2500):
+    def proposition_reuse_packet(
+        self,
+        property_name,
+        form_text="",
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_chars=2500,
+    ):
         examples = self.reusable_proposition_examples(
             property_name,
             form_text=form_text,
@@ -1098,12 +1132,15 @@ class MemoryManager:
                     f"  conclusion={item['conclusion']}",
                 ]
             )
-        text = "\n".join(lines).strip()
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n".join(lines), max_chars=max_chars)
 
-    def tool_request_reuse_packet(self, property_name, form_text="", max_items=4, max_chars=2200):
+    def tool_request_reuse_packet(
+        self,
+        property_name,
+        form_text="",
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_chars=2200,
+    ):
         examples = self.reusable_tool_request_examples(
             property_name,
             form_text=form_text,
@@ -1123,12 +1160,15 @@ class MemoryManager:
                     f"  summary={item['summary']}",
                 ]
             )
-        text = "\n".join(lines).strip()
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n".join(lines), max_chars=max_chars)
 
-    def property_memory_packet(self, property_name, form_text="", max_items=4, max_chars=3500):
+    def property_memory_packet(
+        self,
+        property_name,
+        form_text="",
+        max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
+        max_chars=3500,
+    ):
         prop = str(property_name or "").strip()
         if not prop:
             return ""
@@ -1168,12 +1208,9 @@ class MemoryManager:
         if tool_reuse:
             parts.append(f"可复用 tool request 模板:\n{tool_reuse}")
 
-        text = "\n\n".join(part for part in parts if part).strip()
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n\n".join(part for part in parts if part), max_chars=max_chars)
 
-    def terminal_report_summary(self, max_items=4, max_chars=4000):
+    def terminal_report_summary(self, max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS, max_chars=4000):
         parts = []
         for record in self.recent_terminal_candidates(limit=max_items):
             prop_bits = []
@@ -1189,10 +1226,7 @@ class MemoryManager:
                 f"pruned_reason={record.pruned_reason or '[none]'}; "
                 f"decision={record.terminal_decision.get('action', '[none]') or '[none]'}"
             )
-        text = "\n".join(parts).strip() or "暂无终态候选。"
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n".join(parts).strip() or "暂无终态候选。", max_chars=max_chars)
 
     def derived_tree_summary(self, max_roots=6, max_chars=3000):
         tree = self.build_derived_tree()
@@ -1212,12 +1246,9 @@ class MemoryManager:
                 lines.append(f"- {root} -> {', '.join(child_list[:6])}")
             else:
                 lines.append(f"- {root}")
-        text = "\n".join(lines).strip() or "暂无派生树。"
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n".join(lines).strip() or "暂无派生树。", max_chars=max_chars)
 
-    def summarize_for_prompt(self, max_candidates=8, max_chars=6000):
+    def summarize_for_prompt(self, max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES, max_chars=6000):
         latest = self.load_latest_candidates()
         latest.sort(key=lambda item: item.candidate_id)
         recent = latest[-max(0, int(max_candidates)) :] if max_candidates else latest
@@ -1252,7 +1283,7 @@ class MemoryManager:
                 )
                 proposition_bits = []
                 for prop in DEFAULT_PROPERTIES:
-                    snapshot = record.proposition_snapshot(prop, max_items=3)
+                    snapshot = record.proposition_snapshot(prop, max_items=MEMORY_REUSE_MAX_ITEMS)
                     if snapshot:
                         proposition_bits.append(f"{prop}[{snapshot}]")
                 if proposition_bits:
@@ -1265,7 +1296,4 @@ class MemoryManager:
                     summary += f"; decision={record.terminal_decision.get('action')}"
                 parts.append(summary)
 
-        text = "\n".join(parts).strip()
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars]
-        return text
+        return self._truncate_text("\n".join(parts), max_chars=max_chars)

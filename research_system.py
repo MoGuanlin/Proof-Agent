@@ -19,12 +19,15 @@ from agents import (
 from app_config import (
     CANDIDATE_MAX_COUNT,
     CANDIDATE_MEMORY_FILE,
+    DISABLE_TEXT_TRUNCATION,
+    LOCAL_PROPERTY_DECISION_MAX_PROPERTIES,
     LITERATURE_MAX_CHARS,
     LITERATURE_RAG_CHUNK_CHARS,
     LITERATURE_RAG_DB_FILE,
     LITERATURE_RAG_EMBEDDING_MODEL,
     LITERATURE_RAG_MAX_CHARS,
     LITERATURE_RAG_OVERLAP_CHARS,
+    LITERATURE_RAG_PER_DOCUMENT_LIMIT,
     LITERATURE_RAG_SUMMARY_CHARS,
     LITERATURE_RAG_TOP_K,
     LITERATURE_RAG_VECTOR_DIM,
@@ -35,8 +38,14 @@ from app_config import (
     MARKER_FORCE_CPU,
     MARKER_FORCE_OCR,
     MARKER_TIMEOUT_SECONDS,
+    MEMORY_PROPERTY_PACKET_MAX_ITEMS,
+    MEMORY_REUSE_MAX_ITEMS,
+    MEMORY_SIMILAR_FAILURE_LIMIT,
+    MEMORY_SUMMARIZE_MAX_CANDIDATES,
+    MEMORY_TERMINAL_REPORT_MAX_ITEMS,
     PDF_PARSE_BACKEND,
     PROOF_REFINEMENT_MAX_ROUNDS,
+    PROPOSITION_REVIEW_MAX_ROUNDS,
     REVIEWER_ROLE_OVERRIDES,
 )
 from candidate_memory import CandidateRecord, MemoryManager
@@ -475,6 +484,8 @@ class AutonomousResearchSystem:
     @staticmethod
     def _truncate_for_prompt(text, max_chars=24000):
         text = str(text or "").strip()
+        if DISABLE_TEXT_TRUNCATION:
+            return text
         if max_chars <= 0 or len(text) <= max_chars:
             return text
         return text[:max_chars]
@@ -503,8 +514,10 @@ class AutonomousResearchSystem:
     def _build_literature_context(raw_md, max_chars=None):
         if max_chars is None:
             max_chars = LITERATURE_MAX_CHARS
-        max_chars = int(max_chars)
         normalized = re.sub(r"\n{3,}", "\n\n", str(raw_md or "")).strip()
+        if DISABLE_TEXT_TRUNCATION:
+            return normalized
+        max_chars = int(max_chars)
         if max_chars <= 0 or len(normalized) <= max_chars:
             return normalized
 
@@ -606,6 +619,7 @@ class AutonomousResearchSystem:
                 query,
                 top_k=top_k,
                 max_chars=snippet_budget,
+                per_document_limit=LITERATURE_RAG_PER_DOCUMENT_LIMIT,
             )
 
         if summary and snippets:
@@ -826,12 +840,15 @@ class AutonomousResearchSystem:
                 f"{goal}\n{candidate.form}\n{candidate.status}\n"
                 f"{candidate.pruned_reason}\npost terminal decision next direction"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=4500,
             summary_max_chars=1800,
         )
         terminal_report = candidate.artifacts.get("terminal_report") or self._build_terminal_candidate_report(candidate)
-        recent_summary = self.memory.terminal_report_summary(max_items=5, max_chars=3500)
+        recent_summary = self.memory.terminal_report_summary(
+            max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
+            max_chars=3500,
+        )
         prompt = (
             f"总目标: {goal}\n"
             f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=7000)}\n\n"
@@ -868,12 +885,18 @@ class AutonomousResearchSystem:
         return decision
 
     def _build_candidate_direction(self, goal, literature_context, terminal_report="", is_initial=False):
-        memory_summary = self.memory.summarize_for_prompt(max_candidates=8, max_chars=5000)
-        terminal_reports = self.memory.terminal_report_summary(max_items=4, max_chars=3500)
+        memory_summary = self.memory.summarize_for_prompt(
+            max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
+            max_chars=5000,
+        )
+        terminal_reports = self.memory.terminal_report_summary(
+            max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
+            max_chars=3500,
+        )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{terminal_report}\n候选设计方向\nN1 N2 N3 D4 Q5 Q6",
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )
@@ -908,11 +931,14 @@ class AutonomousResearchSystem:
         ).strip()
 
     def _design_candidate(self, goal, literature_context, direction, candidate_index):
-        memory_summary = self.memory.summarize_for_prompt(max_candidates=8, max_chars=5000)
+        memory_summary = self.memory.summarize_for_prompt(
+            max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
+            max_chars=5000,
+        )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{direction}\n新势函数候选\n{' '.join(self.property_order)}",
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )
@@ -962,7 +988,7 @@ class AutonomousResearchSystem:
                 f"{goal}\n{candidate.form}\n{candidate.intuition}\n{candidate.source_direction}\n"
                 "proof plan reusable props needs redo priority N2 N3 D4 Q5 Q6"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )
@@ -1017,10 +1043,21 @@ class AutonomousResearchSystem:
         return payload
 
     def _candidate_memory_context(self, candidate):
-        similar = self.memory.find_similar_failures(candidate.form, limit=2)
+        similar = self.memory.find_similar_failures(
+            candidate.form,
+            limit=MEMORY_SIMILAR_FAILURE_LIMIT,
+        )
         if not similar:
-            return self.memory.summarize_for_prompt(max_candidates=8, max_chars=5000)
-        lines = [self.memory.summarize_for_prompt(max_candidates=6, max_chars=3000)]
+            return self.memory.summarize_for_prompt(
+                max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
+                max_chars=5000,
+            )
+        lines = [
+            self.memory.summarize_for_prompt(
+                max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
+                max_chars=3000,
+            )
+        ]
         for item in similar:
             lines.append(
                 f"- 相似失败 {item.candidate_id}: form={item.form}; pruned_reason={item.pruned_reason or '[缺失]'}"
@@ -1038,12 +1075,17 @@ class AutonomousResearchSystem:
         return remaining
 
     def _candidate_planning_memory(self, candidate):
-        parts = [self.memory.summarize_for_prompt(max_candidates=6, max_chars=2500)]
+        parts = [
+            self.memory.summarize_for_prompt(
+                max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
+                max_chars=2500,
+            )
+        ]
         for prop in self.property_order:
             packet = self.memory.property_memory_packet(
                 prop,
                 form_text=candidate.form,
-                max_items=2,
+                max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
                 max_chars=900,
             )
             if packet:
@@ -1055,7 +1097,7 @@ class AutonomousResearchSystem:
         property_packet = self.memory.property_memory_packet(
             property_name,
             form_text=candidate.form,
-            max_items=4,
+            max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
             max_chars=2500,
         )
         if not property_packet:
@@ -1066,7 +1108,13 @@ class AutonomousResearchSystem:
             if part
         ).strip()
 
-    def _property_reuse_context(self, candidate, property_name, max_items=3, max_chars=2200):
+    def _property_reuse_context(
+        self,
+        candidate,
+        property_name,
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_chars=2200,
+    ):
         return self.memory.proposition_reuse_packet(
             property_name,
             form_text=candidate.form,
@@ -1074,7 +1122,13 @@ class AutonomousResearchSystem:
             max_chars=max_chars,
         )
 
-    def _tool_request_reuse_context(self, candidate, property_name, max_items=3, max_chars=2200):
+    def _tool_request_reuse_context(
+        self,
+        candidate,
+        property_name,
+        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_chars=2200,
+    ):
         return self.memory.tool_request_reuse_packet(
             property_name,
             form_text=candidate.form,
@@ -1162,12 +1216,16 @@ class AutonomousResearchSystem:
             return fallback
 
         remaining = self._remaining_candidate_properties(candidate, self.property_order)
+        if LOCAL_PROPERTY_DECISION_MAX_PROPERTIES > 0:
+            property_scope = remaining[: int(LOCAL_PROPERTY_DECISION_MAX_PROPERTIES)]
+        else:
+            property_scope = remaining
         property_packets = []
-        for prop in remaining[:4]:
+        for prop in property_scope:
             packet = self.memory.property_memory_packet(
                 prop,
                 form_text=candidate.form,
-                max_items=2,
+                max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
                 max_chars=700,
             )
             if packet:
@@ -1179,7 +1237,7 @@ class AutonomousResearchSystem:
                 f"{self._candidate_property_snapshot(candidate)}\n"
                 f"last_property={last_property}\nnext local proof step"
             ),
-            top_k=3,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=3500,
             summary_max_chars=1500,
         )
@@ -1299,14 +1357,19 @@ class AutonomousResearchSystem:
     def _plan_property_propositions(self, candidate, property_name, goal, literature_context):
         property_guidance = self._property_guidance(property_name)
         memory_context = self._property_memory_context(candidate, property_name)
-        reuse_context = self._property_reuse_context(candidate, property_name, max_items=3, max_chars=1800)
+        reuse_context = self._property_reuse_context(
+            candidate,
+            property_name,
+            max_items=MEMORY_REUSE_MAX_ITEMS,
+            max_chars=1800,
+        )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=(
                 f"{goal}\n{candidate.form}\n{property_name}\n{candidate.intuition}\n"
                 f"{candidate.risk_notes}\nproposition decomposition"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )
@@ -1411,7 +1474,12 @@ class AutonomousResearchSystem:
             self._extract_markdown_section(draft, "Verification Needs"),
             max_chars=2400,
         ) or "[未显式给出]"
-        tool_reuse_context = self._tool_request_reuse_context(candidate, property_name, max_items=3, max_chars=1800)
+        tool_reuse_context = self._tool_request_reuse_context(
+            candidate,
+            property_name,
+            max_items=MEMORY_REUSE_MAX_ITEMS,
+            max_chars=1800,
+        )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=(
@@ -1419,7 +1487,7 @@ class AutonomousResearchSystem:
                 f"{proposition_claim}\n{verification_needs}\n"
                 "tool request verification numeric symbolic certificate"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=4500,
             summary_max_chars=1800,
         )
@@ -1682,12 +1750,17 @@ class AutonomousResearchSystem:
                 f"{goal}\n{candidate.form}\n{property_name}\n{proposition_title}\n"
                 f"{proposition_claim}\n{verification_focus}\n{dependencies}"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )
         dependency_context = self._proposition_dependency_context(candidate, property_name, proposition)
-        reuse_context = self._property_reuse_context(candidate, property_name, max_items=3, max_chars=1800)
+        reuse_context = self._property_reuse_context(
+            candidate,
+            property_name,
+            max_items=MEMORY_REUSE_MAX_ITEMS,
+            max_chars=1800,
+        )
         prompt_base = (
             f"总目标: {goal}\n"
             f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
@@ -1762,7 +1835,7 @@ class AutonomousResearchSystem:
             return False, "", False
 
         final_feedback = ""
-        for attempt in range(3):
+        for attempt in range(max(1, int(PROPOSITION_REVIEW_MAX_ROUNDS or 1))):
             current_round_pass = True
             for reviewer in self.candidate_reviewers:
                 review_context = (
@@ -1972,7 +2045,7 @@ class AutonomousResearchSystem:
                 f"{candidate.estimated_c}\n{candidate.risk_notes}\n"
                 f"{self._candidate_property_snapshot(candidate)}"
             ),
-            top_k=4,
+            top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=5000,
             summary_max_chars=2200,
         )

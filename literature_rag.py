@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from app_config import (
+    DISABLE_TEXT_TRUNCATION,
+    LITERATURE_RAG_MAX_CHARS,
+    LITERATURE_RAG_PER_DOCUMENT_LIMIT,
+    LITERATURE_RAG_TOP_K,
+)
+
 try:
     from sentence_transformers import SentenceTransformer
 except Exception:  # pragma: no cover - optional dependency
@@ -497,10 +504,18 @@ class LiteratureRAG:
         finally:
             conn.close()
 
-    def retrieve(self, query, top_k=4, max_chars=5000, per_document_limit=2):
+    def retrieve(
+        self,
+        query,
+        top_k=LITERATURE_RAG_TOP_K,
+        max_chars=LITERATURE_RAG_MAX_CHARS,
+        per_document_limit=LITERATURE_RAG_PER_DOCUMENT_LIMIT,
+    ):
         token_counts = self._tokenize_with_counts(query)
         if not token_counts or not self.chunks:
             return []
+        if DISABLE_TEXT_TRUNCATION:
+            max_chars = 0
 
         query_vector = self._encode_text(query, token_counts=token_counts)
         if float(np.linalg.norm(query_vector)) <= 0.0:
@@ -560,7 +575,13 @@ class LiteratureRAG:
             used_chars += len(text) + 2
         return selected
 
-    def render(self, query, top_k=4, max_chars=5000, per_document_limit=2):
+    def render(
+        self,
+        query,
+        top_k=LITERATURE_RAG_TOP_K,
+        max_chars=LITERATURE_RAG_MAX_CHARS,
+        per_document_limit=LITERATURE_RAG_PER_DOCUMENT_LIMIT,
+    ):
         items = self.retrieve(
             query,
             top_k=top_k,
