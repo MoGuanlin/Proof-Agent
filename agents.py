@@ -44,6 +44,74 @@ class BaseAgent:
         return matches[-1].strip() if matches else None
 
     @staticmethod
+    def _expects_json_content(content_hint):
+        hint = str(content_hint or "").lower()
+        return "json" in hint or "对象" in hint or "数组" in hint or "object" in hint or "array" in hint
+
+    @staticmethod
+    def _coerce_json_candidate(candidate, content_hint=""):
+        text = str(candidate or "").strip()
+        if not text:
+            return None
+        hint = str(content_hint or "").lower()
+        wants_array = "数组" in hint or "array" in hint
+        wants_object = "对象" in hint or "object" in hint
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if wants_array and not isinstance(parsed, list):
+            return None
+        if wants_object and not isinstance(parsed, dict):
+            return None
+        return text
+
+    @staticmethod
+    def _extract_last_json_substring(text, content_hint=""):
+        source = str(text or "")
+        if not source.strip():
+            return None
+        hint = str(content_hint or "").lower()
+        wants_array = "数组" in hint or "array" in hint
+        wants_object = "对象" in hint or "object" in hint
+        decoder = json.JSONDecoder()
+        openings = []
+        for idx, ch in enumerate(source):
+            if ch == "{":
+                openings.append((idx, "{"))
+            elif ch == "[":
+                openings.append((idx, "["))
+        for idx, ch in reversed(openings):
+            if wants_object and ch != "{":
+                continue
+            if wants_array and ch != "[":
+                continue
+            try:
+                _, end = decoder.raw_decode(source[idx:])
+            except json.JSONDecodeError:
+                continue
+            candidate = source[idx : idx + end].strip()
+            validated = BaseAgent._coerce_json_candidate(candidate, content_hint=content_hint)
+            if validated:
+                return validated
+        return None
+
+    @staticmethod
+    def _extract_json_fallback(text, content_hint=""):
+        if not BaseAgent._expects_json_content(content_hint):
+            return None
+        source = str(text or "")
+        fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", source, flags=re.IGNORECASE)
+        for block in reversed(fenced_blocks):
+            validated = BaseAgent._coerce_json_candidate(block, content_hint=content_hint)
+            if validated:
+                return validated
+        direct = BaseAgent._coerce_json_candidate(source.strip(), content_hint=content_hint)
+        if direct:
+            return direct
+        return BaseAgent._extract_last_json_substring(source, content_hint=content_hint)
+
+    @staticmethod
     def _merge_openai_content(piece):
         if isinstance(piece, str):
             return piece
@@ -250,6 +318,13 @@ class BaseAgent:
         )
         raw = self.call_llm(wrapped_prompt, stream=stream, print_stream=print_stream)
         extracted = self._extract_tagged_content(raw, safe_tag)
+        if not extracted:
+            extracted = self._extract_json_fallback(raw, content_hint=content_hint)
+            if extracted:
+                print(
+                    f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback",
+                    flush=True,
+                )
         if not extracted:
             raise RuntimeError(f"[{self.name}] missing non-empty <{safe_tag}>")
         return extracted

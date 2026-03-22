@@ -504,7 +504,7 @@ class AutonomousResearchSystem:
         replacement = f"## {section_title}\n{str(new_body or '').strip()}\n"
         pattern = rf"(?ims)^##\s*{re.escape(section_title)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
         if re.search(pattern, text):
-            return re.sub(pattern, replacement, text, count=1)
+            return re.sub(pattern, lambda _match: replacement, text, count=1)
         suffix = "\n\n" if text.strip() else ""
         return f"{text.rstrip()}{suffix}{replacement}".strip()
 
