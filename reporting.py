@@ -21,6 +21,33 @@ from app_config import (
 )
 
 
+def _truncate_filename_utf8(filename: str, max_bytes: int = 240) -> str:
+    text = str(filename or "").strip() or "research_output.md"
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+
+    if "." in text:
+        stem, ext = text.rsplit(".", 1)
+        suffix = f".{ext}"
+    else:
+        stem, suffix = text, ""
+
+    suffix_bytes = suffix.encode("utf-8")
+    budget = max(1, int(max_bytes) - len(suffix_bytes))
+    trimmed = stem.encode("utf-8")[:budget]
+    while True:
+        try:
+            safe_stem = trimmed.decode("utf-8").rstrip("._-")
+            break
+        except UnicodeDecodeError:
+            trimmed = trimmed[:-1]
+            if not trimmed:
+                safe_stem = "research_output"
+                break
+    return f"{safe_stem or 'research_output'}{suffix}"
+
+
 def _build_report_filename(goal_text):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     goal_norm = _normalize_whitespace(goal_text)
@@ -45,4 +72,4 @@ def _build_report_filename(goal_text):
         f"research_output_{ts}_{goal_short}_{goal_hash}_"
         f"{model_short}_{temps_short}_{stream_token}_{timeout_token}_{backend_short}.md"
     )
-    return filename[:240]
+    return _truncate_filename_utf8(filename, max_bytes=240)
