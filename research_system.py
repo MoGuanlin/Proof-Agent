@@ -68,6 +68,53 @@ class CandidateExplorationPipeline:
         self.refinement_target = None
         self.refinement_report = ""
 
+    def _select_best_passed_candidate(self, passed_candidates):
+        items = list(passed_candidates or [])
+        if not items:
+            return None
+        if len(items) == 1:
+            return items[0]
+
+        ranking_payload = []
+        for index, candidate in enumerate(items, start=1):
+            ranking_payload.append(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "estimated_c": candidate.estimated_c or "[unknown]",
+                    "risk_notes": candidate.risk_notes or "[none]",
+                    "terminal_decision": dict(candidate.terminal_decision or {}),
+                    "terminal_report": (candidate.artifacts or {}).get("terminal_report", "") or "[missing]",
+                    "order_index": index,
+                }
+            )
+
+        prompt = (
+            f"总目标: {self.goal}\n"
+            "下面是所有已通过候选的终态信息。请只从这些候选中选出当前最适合进入 proof refinement 的一个。\n\n"
+            f"{json.dumps(ranking_payload, ensure_ascii=False, indent=2)}\n\n"
+            "请输出 JSON 对象，字段必须包括：best_candidate_id, rationale, ranking。\n"
+            "其中 ranking 必须是数组；每个元素必须包含 candidate_id, rank, rationale。\n"
+            "排序时请综合 terminal_report、estimated_c、risk_notes，以及候选是否更成熟、更适合进入证明完善阶段。\n"
+            "不要提出新的候选，不要输出列表外的 candidate_id。\n"
+            "<PASSED_CANDIDATE_RANKING> 标签内只能放 JSON 对象。"
+        )
+        try:
+            payload = self.system._parse_json_object(
+                orchestrator.call_llm_tagged(
+                    prompt,
+                    tag_name="PASSED_CANDIDATE_RANKING",
+                    content_hint="标签内必须是合法 JSON 对象。",
+                    print_stream=True,
+                )
+            )
+            candidate_id = str(payload.get("best_candidate_id", "")).strip()
+            for candidate in items:
+                if candidate.candidate_id == candidate_id:
+                    return candidate
+        except Exception:
+            pass
+        return items[-1]
+
     def run(self):
         self.direction = self.system._build_candidate_direction(
             self.goal,
@@ -82,7 +129,7 @@ class CandidateExplorationPipeline:
         if not self.search_stage:
             if self.passed_candidates:
                 self.search_stage = "proof_refinement_budget_exhausted"
-                self.refinement_target = self.refinement_target or self.passed_candidates[-1]
+                self.refinement_target = self.refinement_target or self._select_best_passed_candidate(self.passed_candidates)
             else:
                 self.search_stage = "budget_exhausted"
 
@@ -205,6 +252,18 @@ class CandidateExplorationPipeline:
         self.search_stage = decision["action"]
         if decision["action"] == "proof_refinement" and candidate.status == "passed":
             self.refinement_target = candidate
+            return
+
+        remaining_budget = self.max_candidate_count - candidate_index
+        if (
+            int(remaining_budget) <= 0
+            and candidate.status != "passed"
+            and self.refinement_target is None
+        ):
+            best_passed = self._select_best_passed_candidate(self.passed_candidates)
+            if best_passed is not None:
+                self.search_stage = "proof_refinement_budget_exhausted_after_failures"
+                self.refinement_target = best_passed
 
 
 class AutonomousResearchSystem:
@@ -817,6 +876,10 @@ class AutonomousResearchSystem:
             cleaned_lines.append(f"- {line}")
         normalized_body = "\n".join(cleaned_lines) if cleaned_lines else "None"
         return self._replace_markdown_section(text, "Verification Needs", normalized_body)
+
+    @staticmethod
+    def _verification_needs_is_none(section_text):
+        return str(section_text or "").strip().lower() == "none"
 
     def _q6_constant_chain_feedback(self, draft):
         claim = self._extract_markdown_section(draft, "Claim")
@@ -1572,6 +1635,7 @@ class AutonomousResearchSystem:
             self._extract_markdown_section(draft, "Verification Needs"),
             max_chars=2400,
         ) or "[未显式给出]"
+        verification_closed = self._verification_needs_is_none(verification_needs)
         tool_reuse_context = self._tool_request_reuse_context(
             candidate,
             property_name,
@@ -1612,6 +1676,8 @@ class AutonomousResearchSystem:
             "每个元素必须包含字段：request_id, tool_name, justification, spec。\n"
             "规则：\n"
             "1) 只有当工具能直接关闭当前 proposition 中尚未闭合的 Verification Needs 时，才可以请求工具；\n"
+            "1.1) 只有当 `Verification Needs` 严格等于 `None` 时，才允许输出 []；\n"
+            "1.2) 若 `Verification Needs` 不是 `None`，则禁止输出 []，必须给出至少一个可执行的 tool request；\n"
             "2) 当前系统支持的 tool_name 只有 verification；\n"
             "3) spec 必须是 verification_tools 可执行的 JSON 对象；支持 mode=numeric_1d 或 mode=symbolic_multivar；\n"
             "4) 若 mode=numeric_1d，则 spec 必须包含 status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes；\n"
@@ -1619,7 +1685,7 @@ class AutonomousResearchSystem:
             "6) expression 必须是 Python 数学表达式，只能使用变量名和 sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e，不得使用 LaTeX；\n"
             "7) 不得虚构文献里不存在的公式；如果只是候选表达式或近似重写，必须在 justification 或 notes 中明确承认；\n"
             "8) 对 Q5，如果 proposition 的关键缺口是局部一维数值证书，应优先请求 numeric_1d；\n"
-            "9) 若你无法给出可执行 spec，就不要请求工具，直接输出 []；\n"
+            "9) 若 `Verification Needs` 不是 `None`，你不能因为无法给出 spec 就输出 []；此时必须尽力给出最可执行的 spec；\n"
             "10) <TOOL_REQUESTS> 标签内只能放 JSON 数组。"
         )
         try:
@@ -1659,6 +1725,13 @@ class AutonomousResearchSystem:
                     "justification": justification,
                     "spec": spec,
                 }
+            )
+
+        if not requests and not verification_closed:
+            candidate.append_log(
+                "tool_requests_invalid",
+                f"{property_name}:{proposition_id} returned empty tool requests despite open Verification Needs",
+                verification_needs=verification_needs,
             )
 
         artifact_key = f"tool_requests_{property_name}_{proposition_id}"

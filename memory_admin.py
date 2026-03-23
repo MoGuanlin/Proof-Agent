@@ -160,6 +160,26 @@ def delete_candidate(conn: sqlite3.Connection, candidate_id: str):
     print(f"Deleted candidate {candidate_id} and {count} snapshot(s).")
 
 
+def delete_candidates_by_status(conn: sqlite3.Connection, status: str):
+    normalized = str(status or "").strip().lower()
+    if not normalized:
+        raise SystemExit("Missing status.")
+    rows = fetch_latest_candidates(conn, status=normalized, limit=0)
+    candidate_ids = []
+    for row in rows:
+        record = candidate_from_snapshot_row(row)
+        if record.candidate_id:
+            candidate_ids.append(record.candidate_id)
+    if not candidate_ids:
+        print(f"No candidates found with status={normalized}.")
+        return []
+    deleted = []
+    for candidate_id in candidate_ids:
+        delete_candidate(conn, candidate_id)
+        deleted.append(candidate_id)
+    return deleted
+
+
 def delete_snapshot(conn: sqlite3.Connection, snapshot_id: int):
     row = conn.execute(
         "SELECT snapshot_id, candidate_id FROM candidate_snapshots WHERE snapshot_id = ?",
@@ -276,6 +296,10 @@ def build_parser():
     delete_candidate_parser.add_argument("--candidate-id", required=True, help="Candidate id to delete.")
     delete_candidate_parser.add_argument("--yes", action="store_true", help="Confirm deletion.")
 
+    delete_status_parser = subparsers.add_parser("delete-status", help="Delete all candidates whose latest status matches.")
+    delete_status_parser.add_argument("--status", required=True, help="Latest status to delete, for example: active.")
+    delete_status_parser.add_argument("--yes", action="store_true", help="Confirm deletion.")
+
     delete_snapshot_parser = subparsers.add_parser("delete-snapshot", help="Delete one snapshot.")
     delete_snapshot_parser.add_argument("--snapshot-id", type=int, required=True, help="Snapshot id to delete.")
     delete_snapshot_parser.add_argument("--yes", action="store_true", help="Confirm deletion.")
@@ -309,6 +333,10 @@ def main():
         if args.command == "delete-candidate":
             require_confirm(args)
             delete_candidate(conn, args.candidate_id)
+            return
+        if args.command == "delete-status":
+            require_confirm(args)
+            delete_candidates_by_status(conn, args.status)
             return
         if args.command == "delete-snapshot":
             require_confirm(args)

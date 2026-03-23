@@ -44,6 +44,14 @@ class BaseAgent:
         return matches[-1].strip() if matches else None
 
     @staticmethod
+    def _wrap_tagged_content(text, tag_name):
+        safe_tag = BaseAgent._normalize_tag_name(tag_name)
+        body = str(text or "").strip()
+        if not body:
+            return ""
+        return f"<{safe_tag}>\n{body}\n</{safe_tag}>"
+
+    @staticmethod
     def _expects_json_content(content_hint):
         hint = str(content_hint or "").lower()
         return "json" in hint or "对象" in hint or "数组" in hint or "object" in hint or "array" in hint
@@ -318,19 +326,83 @@ class BaseAgent:
         )
         raw = self.call_llm(wrapped_prompt, stream=stream, print_stream=print_stream)
         extracted = self._extract_tagged_content(raw, safe_tag)
-        if not extracted:
-            extracted = self._extract_json_fallback(raw, content_hint=content_hint)
-            if extracted:
+        if extracted:
+            return extracted
+
+        extracted = self._extract_json_fallback(raw, content_hint=content_hint)
+        if extracted:
+            print(
+                f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback",
+                flush=True,
+            )
+            return extracted
+
+        if safe_tag.upper() == "REVIEW_RESULT":
+            verdict_text = ReviewerAgent._extract_fulltext_reviewer_result(raw)
+            if verdict_text:
                 print(
-                    f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback",
+                    f"[{self.name}] recovered missing <{safe_tag}> via full-text verdict fallback",
                     flush=True,
                 )
-        if not extracted:
-            raise RuntimeError(f"[{self.name}] missing non-empty <{safe_tag}>")
-        return extracted
+                return verdict_text
+
+        repair_prompt = (
+            f"你上一条回复没有提供可解析的 <{safe_tag}> 标签内容。\n"
+            f"请仅输出一个完整且闭合的 <{safe_tag}> 标签，不要输出任何标签外内容。\n"
+            f"<{safe_tag}>\n"
+            "...内容...\n"
+            f"</{safe_tag}>\n"
+            f"{hint_line}\n"
+            "若是评审结论，标签内第一行必须且只能是 [PASS] 或 [REJECT]。"
+        )
+        repair_raw = self.call_llm(repair_prompt, stream=stream, print_stream=print_stream)
+        extracted = self._extract_tagged_content(repair_raw, safe_tag)
+        if extracted:
+            print(
+                f"[{self.name}] recovered missing <{safe_tag}> via format-repair retry",
+                flush=True,
+            )
+            return extracted
+
+        extracted = self._extract_json_fallback(repair_raw, content_hint=content_hint)
+        if extracted:
+            print(
+                f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback after retry",
+                flush=True,
+            )
+            return extracted
+
+        if safe_tag.upper() == "REVIEW_RESULT":
+            verdict_text = ReviewerAgent._extract_fulltext_reviewer_result(repair_raw)
+            if verdict_text:
+                print(
+                    f"[{self.name}] recovered missing <{safe_tag}> via full-text verdict fallback after retry",
+                    flush=True,
+                )
+                return verdict_text
+
+        raise RuntimeError(f"[{self.name}] missing non-empty <{safe_tag}>")
 
 
 class ReviewerAgent(BaseAgent):
+    @staticmethod
+    def _extract_fulltext_reviewer_result(text):
+        source = str(text or "").strip()
+        if not source:
+            return None
+        source = re.sub(r"(?is)</?REVIEW_RESULT\s*>", "", source).strip()
+        match = re.search(r"(?im)^\s*(\[(?:PASS|REJECT)\])\s*$", source)
+        if match:
+            verdict = match.group(1).upper()
+            tail = source[match.end() :].strip()
+            return f"{verdict}\n{tail}".strip()
+        inline = re.search(r"(?i)\[(pass|reject)\]", source)
+        if inline:
+            verdict = f"[{inline.group(1).upper()}]"
+            tail = source[inline.end() :].strip()
+            return f"{verdict}\n{tail}".strip()
+        return None
+
     @staticmethod
     def _contains_fatal_issue_language(text):
         normalized = str(text or "").lower()
