@@ -1108,7 +1108,7 @@ class MemoryManager:
         property_name,
         form_text="",
         max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=2500,
+        max_chars=5000,
     ):
         examples = self.reusable_proposition_examples(
             property_name,
@@ -1139,7 +1139,7 @@ class MemoryManager:
         property_name,
         form_text="",
         max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=2200,
+        max_chars=4500,
     ):
         examples = self.reusable_tool_request_examples(
             property_name,
@@ -1167,7 +1167,7 @@ class MemoryManager:
         property_name,
         form_text="",
         max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-        max_chars=3500,
+        max_chars=7000,
     ):
         prop = str(property_name or "").strip()
         if not prop:
@@ -1210,7 +1210,7 @@ class MemoryManager:
 
         return self._truncate_text("\n\n".join(part for part in parts if part), max_chars=max_chars)
 
-    def terminal_report_summary(self, max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS, max_chars=4000):
+    def terminal_report_summary(self, max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS, max_chars=8000):
         parts = []
         for record in self.recent_terminal_candidates(limit=max_items):
             prop_bits = []
@@ -1228,7 +1228,7 @@ class MemoryManager:
             )
         return self._truncate_text("\n".join(parts).strip() or "暂无终态候选。", max_chars=max_chars)
 
-    def derived_tree_summary(self, max_roots=6, max_chars=3000):
+    def derived_tree_summary(self, max_roots=6, max_chars=6000):
         tree = self.build_derived_tree()
         children = tree["children"]
         nodes = tree["nodes"]
@@ -1248,7 +1248,7 @@ class MemoryManager:
                 lines.append(f"- {root}")
         return self._truncate_text("\n".join(lines).strip() or "暂无派生树。", max_chars=max_chars)
 
-    def summarize_for_prompt(self, max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES, max_chars=6000):
+    def summarize_for_prompt(self, max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES, max_chars=12000):
         latest = self.load_latest_candidates()
         latest.sort(key=lambda item: item.candidate_id)
         recent = latest[-max(0, int(max_candidates)) :] if max_candidates else latest

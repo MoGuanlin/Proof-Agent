@@ -271,3 +271,7 @@ nohup: ignoring input
 🏆 [Step 6/6] 科研任务圆满完成！
 
 ✨ 报告已生成: research_output_20260308_191007_改进论文中的bound_达到更紧的结果_15f7a7b3_gemini-3.1-flash-lite-preview_arch0.3_pi0.7_gen0.7_rev0.7-0.7-0.7_stream0_to3000_marker.md
+Memory admin web UI listening on http://127.0.0.1:8765
+Memory admin web UI listening on http://127.0.0.1:8765
+[memory_admin_web] 127.0.0.1 - "GET /?status=&limit=50 HTTP/1.1" 200 -
+[memory_admin_web] 127.0.0.1 - "GET /?status=&limit=50 HTTP/1.1" 200 -

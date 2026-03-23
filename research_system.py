@@ -665,10 +665,10 @@ class AutonomousResearchSystem:
 
     def _generate_reviewer_directive(self, reviewer, context, draft, stage_label="子任务审查"):
         reviewer_name = reviewer.name if hasattr(reviewer, "name") else "Reviewer"
-        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=1600) or "[缺失]"
-        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=1200) or "[缺失]"
-        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=1800) or "[缺失]"
-        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=1200) or "[缺失]"
+        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=3200) or "[缺失]"
+        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=2400) or "[缺失]"
+        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=5200) or "[缺失]"
+        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=2400) or "[缺失]"
         q6_contract = ""
         if "q6" in str(context or "").lower():
             q6_contract = (
@@ -679,7 +679,7 @@ class AutonomousResearchSystem:
             f"阶段: {stage_label}\n"
             f"审稿人: {reviewer_name}\n"
             f"Current Task Contract:\n"
-            f"- 任务上下文: {self._truncate_for_prompt(context, max_chars=1200)}\n"
+            f"- 任务上下文: {self._truncate_for_prompt(context, max_chars=2400)}\n"
             f"- 当前假设: {assumptions}\n"
             f"- 当前主张: {claim}\n"
             f"- 当前结论: {conclusion}\n"
@@ -939,17 +939,17 @@ class AutonomousResearchSystem:
                 f"{candidate.pruned_reason}\npost terminal decision next direction"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=4500,
-            summary_max_chars=1800,
+            snippet_max_chars=9000,
+            summary_max_chars=4000,
         )
         terminal_report = candidate.artifacts.get("terminal_report") or self._build_terminal_candidate_report(candidate)
         recent_summary = self.memory.terminal_report_summary(
             max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
-            max_chars=3500,
+            max_chars=7000,
         )
         prompt = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=7000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
             f"最新终态候选报告:\n{terminal_report}\n\n"
             f"近期终态候选摘要:\n{recent_summary or '[暂无]'}\n\n"
             f"当前统计: passed={len(passed_candidates)}, pruned={len(pruned_candidates)}, remaining_budget={remaining_budget}\n\n"
@@ -985,18 +985,18 @@ class AutonomousResearchSystem:
     def _build_candidate_direction(self, goal, literature_context, terminal_report="", is_initial=False):
         memory_summary = self.memory.summarize_for_prompt(
             max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-            max_chars=5000,
+            max_chars=12000,
         )
         terminal_reports = self.memory.terminal_report_summary(
             max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
-            max_chars=3500,
+            max_chars=7000,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{terminal_report}\n候选设计方向\nN1 N2 N3 D4 Q5 Q6",
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=12000,
+            summary_max_chars=5000,
         )
         prompt_header = (
             "请给出首轮探索方向。"
@@ -1010,7 +1010,7 @@ class AutonomousResearchSystem:
         )
         prompt = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
             f"{terminal_block}"
             f"近期终态候选摘要:\n{terminal_reports or '[暂无终态候选]'}\n\n"
             f"候选历史摘要:\n{memory_summary or '[暂无历史候选]'}\n\n"
@@ -1031,18 +1031,18 @@ class AutonomousResearchSystem:
     def _design_candidate(self, goal, literature_context, direction, candidate_index):
         memory_summary = self.memory.summarize_for_prompt(
             max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-            max_chars=5000,
+            max_chars=12000,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{direction}\n新势函数候选\n{' '.join(self.property_order)}",
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=12000,
+            summary_max_chars=5000,
         )
         prompt = (
             f"研究目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
             f"当前方向:\n{direction}\n\n"
             f"历史候选摘要:\n{memory_summary or '[暂无历史候选]'}\n\n"
             "请提出一个新的势函数候选，并输出 JSON 对象，字段必须包括：\n"
@@ -1324,7 +1324,7 @@ class AutonomousResearchSystem:
                 prop,
                 form_text=candidate.form,
                 max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-                max_chars=700,
+                max_chars=1800,
             )
             if packet:
                 property_packets.append(f"[{prop}]\n{packet}")
@@ -1336,12 +1336,12 @@ class AutonomousResearchSystem:
                 f"last_property={last_property}\nnext local proof step"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=3500,
-            summary_max_chars=1500,
+            snippet_max_chars=8000,
+            summary_max_chars=3500,
         )
         prompt = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=7000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
             f"候选 ID: {candidate.candidate_id}\n"
             f"候选形式: {candidate.form}\n"
             f"设计动机: {candidate.intuition or '[缺失]'}\n"
@@ -1349,7 +1349,7 @@ class AutonomousResearchSystem:
             f"当前性质快照: {self._candidate_property_snapshot(candidate)}\n"
             f"刚刚完成的性质: {last_property}\n"
             f"剩余未通过性质: {', '.join(remaining) or '[无]'}\n\n"
-            f"相关性质记忆:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=5000) or '[暂无]'}\n\n"
+            f"相关性质记忆:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=12000) or '[暂无]'}\n\n"
             "你现在是探索层内部的本地 proof planner。"
             "请基于当前候选的局部进展，决定下一步在该候选内部该做什么。"
             "输出 JSON 对象，字段必须包括：action, next_property, updated_priority, rationale, risk_update。\n"
@@ -1459,7 +1459,7 @@ class AutonomousResearchSystem:
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=1800,
+            max_chars=4200,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
@@ -1468,12 +1468,12 @@ class AutonomousResearchSystem:
                 f"{candidate.risk_notes}\nproposition decomposition"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=12000,
+            summary_max_chars=5000,
         )
         prompt = (
             f"研究目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
             f"候选 ID: {candidate.candidate_id}\n"
             f"候选形式: {candidate.form}\n"
             f"当前性质: {property_name}\n"
@@ -1576,7 +1576,7 @@ class AutonomousResearchSystem:
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=1800,
+            max_chars=4200,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
@@ -1586,13 +1586,13 @@ class AutonomousResearchSystem:
                 "tool request verification numeric symbolic certificate"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=4500,
-            summary_max_chars=1800,
+            snippet_max_chars=10000,
+            summary_max_chars=4000,
         )
         clean_draft = self._strip_tool_reports(draft)
         prompt = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=7000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
             f"{property_context}\n"
             f"候选 ID: {candidate.candidate_id}\n"
             f"候选形式: {candidate.form}\n"
@@ -1605,7 +1605,7 @@ class AutonomousResearchSystem:
             f"- Verification Focus: {str(proposition.get('verification_focus', '')).strip() or '[缺失]'}\n"
             f"- Planner Says Requires Tool: {'yes' if self._parse_bool_flag(proposition.get('requires_tool')) else 'no'}\n\n"
             f"Planner Tool Plan:\n{self._render_tool_plan(tool_plan)}\n\n"
-            f"当前 proposition 草稿:\n{self._truncate_for_prompt(clean_draft, max_chars=10000)}\n\n"
+            f"当前 proposition 草稿:\n{self._truncate_for_prompt(clean_draft, max_chars=24000)}\n\n"
             f"当前草稿中的 Verification Needs:\n{verification_needs}\n\n"
             f"历史可复用 tool request 模板:\n{tool_reuse_context or '[暂无]'}\n\n"
             "请判断当前 proposition 是否需要调用外部工具，并输出 JSON 数组。若不需要任何工具，输出 []。\n"
@@ -1849,19 +1849,19 @@ class AutonomousResearchSystem:
                 f"{proposition_claim}\n{verification_focus}\n{dependencies}"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=12000,
+            summary_max_chars=5000,
         )
         dependency_context = self._proposition_dependency_context(candidate, property_name, proposition)
         reuse_context = self._property_reuse_context(
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=1800,
+            max_chars=4200,
         )
         prompt_base = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
             f"{property_context}\n"
             f"候选历史/性质记忆:\n{memory_context or '[暂无]'}\n\n"
             f"当前性质合同:\n{property_guidance or '[无额外合同]'}\n\n"
@@ -2203,12 +2203,12 @@ class AutonomousResearchSystem:
                 f"{self._candidate_property_snapshot(candidate)}"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=12000,
+            summary_max_chars=5000,
         )
         prompt_base = (
             f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
+            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
             f"候选 ID: {candidate.candidate_id}\n"
             f"候选形式: {candidate.form}\n"
             f"设计动机: {candidate.intuition or '[缺失]'}\n"
@@ -2217,7 +2217,7 @@ class AutonomousResearchSystem:
             f"Property Snapshot: {self._candidate_property_snapshot(candidate)}\n"
             f"Terminal Report:\n{candidate.artifacts.get('terminal_report', '[missing]')}\n\n"
             "已通过的性质证明材料:\n"
-            f"{self._truncate_for_prompt(property_bundle, max_chars=26000)}\n\n"
+            f"{self._truncate_for_prompt(property_bundle, max_chars=80000)}\n\n"
             "你现在处于 proof refinement 阶段。请把已经通过的局部性质整理成一份更连贯的候选证明包，"
             "用于判断这个候选是否值得进入后续人工深挖。"
             "严格使用以下 Markdown 骨架：\n"
