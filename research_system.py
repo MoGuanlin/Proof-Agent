@@ -1682,11 +1682,15 @@ class AutonomousResearchSystem:
             "3) spec 必须是 verification_tools 可执行的 JSON 对象；支持 mode=numeric_1d 或 mode=symbolic_multivar；\n"
             "4) 若 mode=numeric_1d，则 spec 必须包含 status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes；\n"
             "5) 若 mode=symbolic_multivar，则 spec 必须包含 status, mode, variables, assumptions, simplifications, partial_derivatives, inequality_checks, substitutions, notes；\n"
-            "6) expression 必须是 Python 数学表达式，只能使用变量名和 sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e，不得使用 LaTeX；\n"
+            "5.1) partial_derivatives 中每个元素必须包含 expression 和 wrt 两个字段；字段名必须严格写成 wrt，不得写 with_respect_to 或其他别名；\n"
+            "5.2) inequality_checks 中每个元素必须把比较拆成 expression, relation, threshold 三个字段；例如要验证 f(x) > 0，应写成 {\"expression\": \"f(x)\", \"relation\": \">\", \"threshold\": 0}；不得把 >、<、>=、<=、== 直接写进 expression；\n"
+            "5.3) symbolic_multivar 的合法最小示例：partial_derivatives=[{\"expression\":\"cos(theta)/(cos(alpha)-cos(gamma))\",\"wrt\":\"alpha\"}]，inequality_checks=[{\"expression\":\"cos(theta)*sin(alpha)/(cos(alpha)-cos(gamma))**2\",\"relation\":\">\",\"threshold\":0}]；\n"
+            "6) expression 必须是 Python 数学表达式，只能使用变量名和 sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e，不得使用 LaTeX，也不得在 expression 中写比较符号；\n"
             "7) 不得虚构文献里不存在的公式；如果只是候选表达式或近似重写，必须在 justification 或 notes 中明确承认；\n"
-            "8) 对 Q5，如果 proposition 的关键缺口是局部一维数值证书，应优先请求 numeric_1d；\n"
+            "8) 对 Q5，如果 proposition 的关键缺口是局部一维数值证书，应优先请求 numeric_1d；只有在确实需要符号偏导/符号不等式时才用 symbolic_multivar；\n"
             "9) 若 `Verification Needs` 不是 `None`，你不能因为无法给出 spec 就输出 []；此时必须尽力给出最可执行的 spec；\n"
-            "10) <TOOL_REQUESTS> 标签内只能放 JSON 数组。"
+            "10) 输出前请自检：partial_derivatives 是否使用 wrt；inequality_checks 是否使用 expression/relation/threshold；\n"
+            "11) <TOOL_REQUESTS> 标签内只能放 JSON 数组。"
         )
         try:
             payload = self._parse_json_array(
@@ -1803,6 +1807,12 @@ class AutonomousResearchSystem:
             tool_name=tool_name,
             report_status=report_payload.get("status", "unknown"),
             spec=spec,
+        )
+        print(
+            f"    🛠️ 工具执行完成 {property_name}:{proposition.get('id', 'prop')} "
+            f"request={request_id} status={report_payload.get('status', 'unknown')} "
+            f"summary={str(report_payload.get('summary', '') or '[none]').strip()}",
+            flush=True,
         )
         return rendered, report_payload, artifact_key
 

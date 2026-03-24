@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from app_config import (
     LITERATURE_RAG_TOP_K,
     LITERATURE_RAG_VECTOR_DIM,
     VOYAGE_API_KEY,
+    VOYAGE_API_RETRY_BACKOFF_SECONDS,
+    VOYAGE_API_RETRY_COUNT,
     VOYAGE_API_TIMEOUT,
 )
 
@@ -447,15 +450,33 @@ class LiteratureRAG:
         self._rebuild_store(rows, store_meta)
 
     def _embed_query(self, query):
-        response = self._voyage.contextualized_embed(
-            inputs=[[str(query or "").strip()]],
-            model=self.embedding_model,
-            input_type="query",
-            output_dimension=self.vector_dim,
+        clean_query = str(query or "").strip()
+        retry_count = max(0, int(VOYAGE_API_RETRY_COUNT or 0))
+        backoff_seconds = max(0, int(VOYAGE_API_RETRY_BACKOFF_SECONDS or 0))
+        attempts = retry_count + 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._voyage.contextualized_embed(
+                    inputs=[[clean_query]],
+                    model=self.embedding_model,
+                    input_type="query",
+                    output_dimension=self.vector_dim,
+                )
+                if not response.results or not response.results[0].embeddings:
+                    return []
+                return [float(x) for x in response.results[0].embeddings[0]]
+            except Exception as exc:
+                last_error = exc
+                self._log(
+                    f"query embedding failed ({attempt}/{attempts}) for model={self.embedding_model}: {exc}"
+                )
+                if attempt < attempts and backoff_seconds > 0:
+                    time.sleep(backoff_seconds)
+        self._log(
+            f"query embedding exhausted retries; falling back to empty retrieval for current query: {last_error}"
         )
-        if not response.results or not response.results[0].embeddings:
-            return []
-        return [float(x) for x in response.results[0].embeddings[0]]
+        return []
 
     def _search_qdrant(self, query, limit):
         vector = self._embed_query(query)
