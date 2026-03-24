@@ -54,7 +54,7 @@ class BaseAgent:
     @staticmethod
     def _expects_json_content(content_hint):
         hint = str(content_hint or "").lower()
-        return "json" in hint or "对象" in hint or "数组" in hint or "object" in hint or "array" in hint
+        return "json" in hint or "object" in hint or "array" in hint
 
     @staticmethod
     def _coerce_json_candidate(candidate, content_hint=""):
@@ -62,8 +62,8 @@ class BaseAgent:
         if not text:
             return None
         hint = str(content_hint or "").lower()
-        wants_array = "数组" in hint or "array" in hint
-        wants_object = "对象" in hint or "object" in hint
+        wants_array = "array" in hint
+        wants_object = "object" in hint
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -80,8 +80,8 @@ class BaseAgent:
         if not source.strip():
             return None
         hint = str(content_hint or "").lower()
-        wants_array = "数组" in hint or "array" in hint
-        wants_object = "对象" in hint or "object" in hint
+        wants_array = "array" in hint
+        wants_object = "object" in hint
         decoder = json.JSONDecoder()
         openings = []
         for idx, ch in enumerate(source):
@@ -313,15 +313,15 @@ class BaseAgent:
     ):
         del max_format_attempts
         safe_tag = self._normalize_tag_name(tag_name)
-        hint_line = f"\n标签内内容要求：{content_hint}" if content_hint else ""
+        hint_line = f"\nContent requirements inside the tag: {content_hint}" if content_hint else ""
         wrapped_prompt = (
             f"{prompt}\n\n"
-            "[输出格式约束]\n"
-            "你可以在标签外输出思考过程，但最终可解析答案必须放在以下标签内：\n"
+            "[Output Format Constraint]\n"
+            "You may think outside the tag, but the final machine-parseable answer must appear inside the following tag:\n"
             f"<{safe_tag}>\n"
-            "...最终答案...\n"
+            "...final answer...\n"
             f"</{safe_tag}>\n"
-            "请确保标签完整且闭合。"
+            "Make sure the tag is complete and properly closed."
             f"{hint_line}"
         )
         raw = self.call_llm(wrapped_prompt, stream=stream, print_stream=print_stream)
@@ -347,13 +347,13 @@ class BaseAgent:
                 return verdict_text
 
         repair_prompt = (
-            f"你上一条回复没有提供可解析的 <{safe_tag}> 标签内容。\n"
-            f"请仅输出一个完整且闭合的 <{safe_tag}> 标签，不要输出任何标签外内容。\n"
+            f"Your previous reply did not provide parseable content inside <{safe_tag}>.\n"
+            f"Please output exactly one complete and closed <{safe_tag}> tag, with no content outside the tag.\n"
             f"<{safe_tag}>\n"
-            "...内容...\n"
+            "...content...\n"
             f"</{safe_tag}>\n"
             f"{hint_line}\n"
-            "若是评审结论，标签内第一行必须且只能是 [PASS] 或 [REJECT]。"
+            "If this is a review result, the first line inside the tag must be exactly [PASS] or [REJECT]."
         )
         repair_raw = self.call_llm(repair_prompt, stream=stream, print_stream=print_stream)
         extracted = self._extract_tagged_content(repair_raw, safe_tag)
@@ -407,17 +407,11 @@ class ReviewerAgent(BaseAgent):
     def _contains_fatal_issue_language(text):
         normalized = str(text or "").lower()
         fatal_markers = (
-            "致命问题",
-            "致命缺陷",
-            "致命错误",
-            "致命逻辑缺陷",
             "fatal issue",
             "fatal issues",
             "fatal flaw",
             "fatal flaws",
             "fatal error",
-            "可直接判 [reject]",
-            "可直接判[reject]",
         )
         return any(marker in normalized for marker in fatal_markers)
 
@@ -425,7 +419,7 @@ class ReviewerAgent(BaseAgent):
     def _force_reject_format(text):
         normalized = str(text or "").strip()
         if not normalized:
-            return "[REJECT]\n致命问题已触发硬拒绝，但 reviewer 未返回可解析内容。"
+            return "[REJECT]\nA fatal issue triggered a hard rejection, but the reviewer did not return parseable content."
         if re.match(r"(?im)^\s*\[pass\]\s*$", normalized):
             return re.sub(r"(?im)^\s*\[pass\]\s*$", "[REJECT]", normalized, count=1)
         lines = normalized.splitlines()
@@ -463,35 +457,35 @@ class ReviewerAgent(BaseAgent):
         directive_block = ""
         if isinstance(review_directive, str) and review_directive.strip():
             directive_block = (
-                "\n[当前证明定制审查指令]\n"
+                "\n[Current Proof-Specific Review Directive]\n"
                 f"{review_directive.strip()}\n"
-                "上述指令仅用于补充本轮关注点，不得覆盖下面的统一审查政策。\n"
+                "This directive only adds task-local focus for the current round and must not override the unified review policy below.\n"
             )
         prompt = (
-            f"任务上下文: {context}\n\n待审查内容:\n{draft}\n\n"
-            "请履行职责。\n"
+            f"Task context: {context}\n\nDraft under review:\n{draft}\n\n"
+            "Perform your reviewer role.\n"
             f"{directive_block}"
-            "统一审查政策（非常重要，不得被覆盖）：\n"
-            "1) 只审查当前任务上下文与当前草稿，不得把过往轮次的问题直接继承到本轮，除非该问题在当前草稿中仍然存在；\n"
-            "2) 必须区分“致命问题”和“可修补问题”；只有致命问题才可判 [REJECT]；\n"
-            "3) 记号漂移、缺一句显式定义、边界条件提醒不足、局部说明不够完整，默认都属于可修补问题，除非它们已经导致关键推导失效；\n"
-            "4) 若草稿显式声明了替代定义、重参数化、坐标系或独立变量，并且后续使用自洽，不得仅因其不同于原论文习惯而判 [REJECT]；\n"
-            "5) 若当前子任务只要求局部引理、参数化、偏导公式或中间不等式，只评估该局部目标，不要求它单独推出最终全局定理或最终 rho 改进；\n"
-            "6) 若任务上下文或 verification 并未要求完成最终全局定理，而草稿却声称“已经证明最终全局定理”“最终上界已成立”“对所有构型已完成全局证明”“完整证明闭环已完成”等，这属于实质性 overclaim，可直接判 [REJECT]；\n"
-            "7) 只有出现以下情况才可判 [REJECT]：关键代数/符号错误；变量依赖或坐标设定自相矛盾；未声明的定义切换导致推导断裂；主张实质性超出草稿已证明范围并改变结论有效性。\n"
-            "审查基准优先级：\n"
-            "1) 当前任务目标与任务上下文中的显式改动要求（最高优先级）；\n"
-            "2) 草稿中明确声明的“本任务新定义/替代定义/重参数化”；\n"
-            "3) 原论文默认定义与符号习惯（仅在不冲突时参考）。\n"
-            "请在 <REVIEW_RESULT> 标签内输出评审结论。\n"
-            "标签内第一行必须且只能是 [PASS] 或 [REJECT]。\n"
-            "若你在后续内容中写出“致命问题”“致命缺陷”“fatal issue”“fatal flaw”等表述，第一行必须是 [REJECT]；若第一行是 [PASS]，后续只能给非致命修补建议。\n"
-            "若为 [PASS]，可在后续行列出非致命修补建议；若为 [REJECT]，只能列出致命问题与可执行修复步骤。\n"
+            "Unified review policy (very important; do not override):\n"
+            "1) Review only the current task context and the current draft. Do not import objections from prior rounds unless they are still literally true in the current draft.\n"
+            "2) Distinguish fatal issues from fixable issues. Only fatal issues justify [REJECT].\n"
+            "3) Minor notation drift, one missing explicit definition, incomplete boundary reminders, or locally thin exposition are fixable by default unless they invalidate a key derivation.\n"
+            "4) If the draft explicitly declares replacement definitions, reparameterizations, coordinates, or independent variables and then uses them consistently, do not reject merely because they differ from the original paper's conventions.\n"
+            "5) If the current subtask is only a local lemma, parameterization, derivative identity, or intermediate inequality, evaluate only that local target and do not require it to establish the final global theorem or final rho improvement by itself.\n"
+            "6) If the task context or verification contract does not require the final global theorem, but the draft claims that the final global theorem, final upper bound, global proof for all configurations, or a complete proof closure has already been established, that is a material overclaim and may be rejected directly.\n"
+            "7) Reject only for concrete algebraic or symbolic mistakes, contradictions in variable dependence or coordinate setup, undeclared definition switches that break the derivation, or claims materially stronger than the draft supports.\n"
+            "Review priority:\n"
+            "1) Explicit task-local requirements and modifications in the current task context.\n"
+            "2) Any replacement definitions or reparameterizations explicitly declared in the current draft.\n"
+            "3) The original paper's default definitions and notation, only as a fallback when there is no conflict.\n"
+            "Output your review only inside <REVIEW_RESULT>.\n"
+            "The first line inside the tag must be exactly [PASS] or [REJECT].\n"
+            "If you use phrases like 'fatal issue', 'fatal flaw', or equivalent language later in the review, the first line must be [REJECT]. If the first line is [PASS], all later comments must be non-fatal repair suggestions.\n"
+            "If you return [PASS], you may list non-fatal fixes afterward. If you return [REJECT], list only the fatal issues and concrete repair steps.\n"
         )
         result = self.call_llm_tagged(
             prompt,
             tag_name="REVIEW_RESULT",
-            content_hint="第一行只能是 [PASS] 或 [REJECT]。",
+            content_hint="The first line must be exactly [PASS] or [REJECT].",
         )
         verdict = self._extract_verdict(result)
         if verdict is None:
@@ -501,43 +495,43 @@ class ReviewerAgent(BaseAgent):
             verdict = False
         return verdict, result
 
-orchestrator = BaseAgent("PI Brain", "课题组负责人，负责宏观任务拆解。")
+orchestrator = BaseAgent("PI Brain", "You are the principal investigator. Drive high-level decomposition and strategic research decisions.")
 logic_rev = ReviewerAgent("Logic Auditor", "")
 global_rev = ReviewerAgent("Global Adversary", "")
 potential_designer = BaseAgent(
     "Potential Function Designer",
     (
-        "你负责为 Delaunay triangulation stretch factor 上界改进任务提出新的势函数候选。"
-        "输出必须聚焦候选形式、设计动机、与 N1/N2/N3/D4/Q5/Q6 的关系，以及与历史失败案例的差异。"
-        "不要写泛泛研究计划；优先给出可被后续证明规划直接消费的精确数学对象。"
+        "You propose new potential-function candidates for improving the upper bound on the Delaunay triangulation stretch factor. "
+        "Focus on the candidate's exact mathematical form, design motivation, relation to N1/N2/N3/D4/Q5/Q6, and how it differs from historical failures. "
+        "Do not write generic research plans; prioritize precise mathematical objects that downstream proof planning can consume directly."
     ),
     0.8,
 )
 proof_planner = BaseAgent(
     "Proof Strategy Planner",
     (
-        "你负责对给定势函数候选制定证明路线图。"
-        "必须明确哪些命题可复用、哪些必须重写、优先验证顺序、主要风险，以及是否存在能直接剪枝的显然失败点。"
-        "优先检查 N2/N3 这类必要条件，再处理 D4/Q5/Q6。"
+        "You design the proof roadmap for a given potential-function candidate. "
+        "Make explicit which propositions can be reused, which must be redone, the preferred verification order, the main risks, and whether there is an obvious early failure that justifies pruning. "
+        "Prioritize necessary conditions such as N2/N3 before D4/Q5/Q6."
     ),
     0.4,
 )
 proof_writer = BaseAgent(
     "Proof Writer",
     (
-        "你负责针对单个候选和单个性质撰写严格的数学证明草稿。"
-        "必须明确假设、推导链、边界条件、仍需数值/符号验证的部分，以及当前性质究竟证明到了什么强度。"
-        "禁止把局部性质夸大成全局上界改进已经完成。"
+        "You write rigorous mathematical proof drafts for one candidate and one property at a time. "
+        "State assumptions, the derivation chain, boundary cases, any remaining numeric or symbolic verification needs, and the exact strength of what has been established. "
+        "Do not inflate a local result into a completed global upper-bound improvement."
     ),
     0.5,
 )
 correctness_checker = ReviewerAgent(
     "Correctness Checker",
     (
-        "你是候选势函数证明的正确性检查员。"
-        "当前主流程里，你以 proposition 粒度审查单个证明草稿。"
-        "只在发现真正致命的数学错误、断裂或越界结论时拒绝。"
-        "若问题可修补，则通过并给出具体修补建议。"
+        "You are the correctness checker for candidate potential-function proofs. "
+        "In the current pipeline you review one proof draft at proposition granularity. "
+        "Reject only for truly fatal mathematical errors, broken reasoning, or overreaching conclusions. "
+        "If the issue is repairable, pass and give concrete repair suggestions."
     ),
 )
 

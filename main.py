@@ -12,24 +12,24 @@ from reporting import _build_report_filename
 from research_system import AutonomousResearchSystem
 
 
-PDF_FILE = "1103.4361v2.pdf"  # 替换为你的 PDF
+PDF_FILE = "1103.4361v2.pdf"
 TARGET_GOAL = """
-目标不是复现或停留在论文与 Section 6 中提到的 ρ <= 1.98。
-1.98 只能视为文献中给出的一个已知中间改进方向或里程碑，不是本次研究的最终目标。
+The goal is not to reproduce or stop at the paper's Section 6 milestone of rho <= 1.98.
+Treat 1.98 only as a known intermediate direction or milestone from the literature, not as the final target of this run.
 
-你的真实任务是：
-在严格遵守原论文几何框架、符号系统与证明要求的前提下，尽可能把 Delaunay triangulation 的 stretch factor 上界进一步压低到小于 1.98 的方向推进，并且只输出有数学支撑的结论。
+Your real task is:
+Under the original paper's geometric framework, notation system, and proof requirements, push the Delaunay triangulation stretch-factor upper bound as far below 1.98 as possible, and output only mathematically supported conclusions.
 
-强约束如下：
-1. 不得把“达到 1.98”当作任务完成。
-2. 若能提出比 1.98 更小的候选上界，必须给出该候选上界所依赖的关键引理、势函数修改、参数条件与证明缺口。
-3. 若暂时无法严格证明小于 1.98 的新上界，不得假装已经改进成功；应明确说明当前卡住的最关键瓶颈、失败原因、哪个局部不等式阻止继续下降，以及下一步最值得推进的方向。
-4. 1.98 可以作为 baseline、对照目标或第一阶段检查点，但后续任务规划必须继续尝试向更小上界推进，而不是自动收缩回“证明 1.98”。
-5. 可以重写原有任务分解；优先寻找能真正推动上界低于 1.98 的新势函数、新参数配置、新局部极值分析或新的数值验证方案。
-6. 所有局部结论都必须标注其支持范围，禁止把局部修正直接夸大成“已完成最终全局证明”。
+Hard constraints:
+1. Do not treat "reaching 1.98" as task completion.
+2. If you propose a candidate upper bound smaller than 1.98, you must state the key lemmas, potential-function modifications, parameter conditions, and remaining proof gaps on which it depends.
+3. If you cannot yet prove a new upper bound strictly below 1.98, do not pretend the improvement has already succeeded. Instead, state the main bottleneck, the failure reason, the local inequality blocking further descent, and the most worthwhile next direction.
+4. 1.98 may be used as a baseline, comparison target, or phase-one checkpoint, but subsequent planning must keep pushing toward smaller upper bounds rather than collapsing back to "prove 1.98".
+5. You may rewrite the existing task decomposition. Prioritize genuinely useful new potential functions, parameter settings, local extremal analyses, or numeric-verification schemes that could move the upper bound below 1.98.
+6. Every local conclusion must state its scope of support. Do not inflate a local repair into "the final global proof is complete".
 
-最终希望得到的不是“围绕 1.98 重复展开”，而是：
-- 给出一个严格支持的新更小上界；
+The desired outcome is not repeated discussion around 1.98, but instead:
+- a rigorously supported new smaller upper bound;
 
 """
 

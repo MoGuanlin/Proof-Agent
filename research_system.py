@@ -89,21 +89,21 @@ class CandidateExplorationPipeline:
             )
 
         prompt = (
-            f"总目标: {self.goal}\n"
-            "下面是所有已通过候选的终态信息。请只从这些候选中选出当前最适合进入 proof refinement 的一个。\n\n"
+            f"Overall goal: {self.goal}\n"
+            "Below is the terminal information for all passed candidates. Select exactly one candidate from this list as the best current target for proof refinement.\n\n"
             f"{json.dumps(ranking_payload, ensure_ascii=False, indent=2)}\n\n"
-            "请输出 JSON 对象，字段必须包括：best_candidate_id, rationale, ranking。\n"
-            "其中 ranking 必须是数组；每个元素必须包含 candidate_id, rank, rationale。\n"
-            "排序时请综合 terminal_report、estimated_c、risk_notes，以及候选是否更成熟、更适合进入证明完善阶段。\n"
-            "不要提出新的候选，不要输出列表外的 candidate_id。\n"
-            "<PASSED_CANDIDATE_RANKING> 标签内只能放 JSON 对象。"
+            "Output a JSON object with the fields: best_candidate_id, rationale, ranking.\n"
+            "ranking must be an array; each element must contain candidate_id, rank, rationale.\n"
+            "Rank the candidates by combining terminal_report, estimated_c, risk_notes, and whether the candidate is more mature and more suitable for proof refinement.\n"
+            "Do not propose new candidates and do not output any candidate_id outside the list above.\n"
+            "Inside <PASSED_CANDIDATE_RANKING>, output only a JSON object."
         )
         try:
             payload = self.system._parse_json_object(
                 orchestrator.call_llm_tagged(
                     prompt,
                     tag_name="PASSED_CANDIDATE_RANKING",
-                    content_hint="标签内必须是合法 JSON 对象。",
+                    content_hint="The tag content must be a valid JSON object.",
                     print_stream=True,
                 )
             )
@@ -285,9 +285,9 @@ class AutonomousResearchSystem:
         )
         hard_constraint = (
             "### Output Format Hard Constraint\n"
-            "- 在 <REVIEW_RESULT> 标签内，第一行必须且只能是 [PASS] 或 [REJECT]。\n"
-            "- 不得使用 [ACCEPT]、[REVISE]、[COMMENT] 或其它替代结论标签。\n"
-            "- 若仅发现可修补问题，仍输出 [PASS]，并在后续行列出修补建议。"
+            "- Inside <REVIEW_RESULT>, the first line must be exactly [PASS] or [REJECT].\n"
+            "- Do not use [ACCEPT], [REVISE], [COMMENT], or any other substitute verdict tag.\n"
+            "- If you find only fixable issues, still output [PASS] and list the repair suggestions afterward."
         )
         return f"{cleaned}\n\n{hard_constraint}".strip()
 
@@ -692,7 +692,7 @@ class AutonomousResearchSystem:
             )
 
         if summary and snippets:
-            return f"文献摘要:\n{summary}\n\n相关文献片段:\n{snippets}"
+            return f"Literature summary:\n{summary}\n\nRelevant literature snippets:\n{snippets}"
         return snippets or summary or ""
 
     def _customize_team(self, macro_goal, literature_context):
@@ -714,7 +714,7 @@ class AutonomousResearchSystem:
             if override_prompt:
                 agent.role = override_prompt
             elif not str(agent.role or "").strip():
-                agent.role = f"你是 {agent.name}，请围绕当前数学任务给出严谨、可执行的输出。"
+                agent.role = f"You are {agent.name}. Produce rigorous, actionable output for the current mathematical task."
             configured_prompts[agent.name] = agent.role
 
         with open("customized_prompts.json", "w", encoding="utf-8") as handle:
@@ -722,36 +722,36 @@ class AutonomousResearchSystem:
         print("📝 已保存静态角色配置: customized_prompts.json")
         print("✅ 专家团队角色加载完成。")
 
-    def _generate_reviewer_directive(self, reviewer, context, draft, stage_label="子任务审查"):
+    def _generate_reviewer_directive(self, reviewer, context, draft, stage_label="subtask review"):
         reviewer_name = reviewer.name if hasattr(reviewer, "name") else "Reviewer"
-        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=3200) or "[缺失]"
-        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=2400) or "[缺失]"
-        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=5200) or "[缺失]"
-        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=2400) or "[缺失]"
+        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=3200) or "[missing]"
+        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=2400) or "[missing]"
+        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=5200) or "[missing]"
+        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=2400) or "[missing]"
         q6_contract = ""
         if "q6" in str(context or "").lower():
             q6_contract = (
-                "8) 若 Q6 草稿声称“可压到 1.98”“支持 rho < 1.98”或其他全局上界改进，"
-                "必须检查 Derivation 是否真的写出了明确常数链条；若没有，视为致命 overclaim 并判 [REJECT]。\n"
+                "8) If a Q6 draft claims it can push the bound to 1.98, support rho < 1.98, or establish any other global upper-bound improvement, "
+                "you must check whether the Derivation actually gives an explicit constant chain. If not, treat it as a fatal overclaim and return [REJECT].\n"
             )
         directive = (
-            f"阶段: {stage_label}\n"
-            f"审稿人: {reviewer_name}\n"
+            f"Stage: {stage_label}\n"
+            f"Reviewer: {reviewer_name}\n"
             f"Current Task Contract:\n"
-            f"- 任务上下文: {self._truncate_for_prompt(context, max_chars=2400)}\n"
-            f"- 当前假设: {assumptions}\n"
-            f"- 当前主张: {claim}\n"
-            f"- 当前结论: {conclusion}\n"
-            "高优先级检查项:\n"
-            "1) 仅审查当前草稿，不继承过往轮次已修复的问题。\n"
-            "2) 检查草稿中的关键符号、变量依赖、坐标设定是否前后一致。\n"
-            "3) 检查 Derivation 中每个关键推导是否真的支持当前 Claim，而不是只给直觉说明。\n"
-            "4) 区分致命问题与可修补问题；缺少提示语、记号轻微漂移、边界提醒不足默认是可修补问题。\n"
-            "5) 若当前任务只是局部性质、参数化、偏导或中间不等式，不得要求其独立完成最终全局定理。\n"
-            "6) 若草稿主动宣称最终全局定理、最终上界或完整证明闭环已经完成，而上下文并未要求该强度，视为致命 overclaim。\n"
-            "7) 若 Derivation 已明确声明替代定义或重参数化，只要后续自洽，不得仅因不同于原文习惯而驳回。\n"
+            f"- Task context: {self._truncate_for_prompt(context, max_chars=2400)}\n"
+            f"- Current assumptions: {assumptions}\n"
+            f"- Current claim: {claim}\n"
+            f"- Current conclusion: {conclusion}\n"
+            "High-priority checks:\n"
+            "1) Review only the current draft; do not inherit issues from previous rounds if they were already repaired.\n"
+            "2) Check whether critical notation, variable dependencies, and coordinate setup remain internally consistent.\n"
+            "3) Check whether each key step in the Derivation really supports the current Claim, rather than merely offering intuition.\n"
+            "4) Distinguish fatal issues from fixable issues; missing signposting, mild notation drift, and incomplete boundary reminders are fixable by default.\n"
+            "5) If the current task is only a local property, parameterization, derivative formula, or intermediate inequality, do not require it to establish the final global theorem on its own.\n"
+            "6) If the draft claims that the final global theorem, final upper bound, or full proof closure is complete even though the context does not require that strength, treat this as a fatal overclaim.\n"
+            "7) If the Derivation explicitly adopts replacement definitions or a reparameterization and then uses them consistently, do not reject merely because they differ from the original paper's conventions.\n"
             f"{q6_contract}"
-            f"Derivation 摘录:\n{derivation}\n"
+            f"Derivation excerpt:\n{derivation}\n"
         )
         return self._sanitize_reviewer_directive(directive)
 
@@ -802,27 +802,27 @@ class AutonomousResearchSystem:
     def _property_guidance(property_name):
         guidance = {
             "N1": (
-                "N1 合同: 必须明确写出基础情形/规范化情形，并说明候选势函数在该情形下如何精确满足要求。"
-                "禁止只给口头直觉；若仍需额外验证，必须在 Verification Needs 中明确写出。"
+                "N1 contract: explicitly state the base or normalized case and explain exactly how the candidate potential satisfies the requirement there. "
+                "Do not give only verbal intuition; if further verification is still needed, state it explicitly in Verification Needs."
             ),
             "N2": (
-                "N2 合同: 必须展示去掉末端盘后的单调性比较式，说明两边对象、参数和差值来源。"
+                "N2 contract: show the monotonicity comparison after removing the terminal disk, including the objects on both sides, the parameters involved, and where each difference term comes from."
             ),
             "N3": (
-                "N3 合同: 必须明确内部分裂后的次可加性或对应不等式，并交代分裂点两侧项如何重组。"
+                "N3 contract: state the subadditivity inequality (or the exact replacement inequality) after an internal split, and explain how the terms on both sides of the split are recombined."
             ),
             "D4": (
-                "D4 合同: 必须说明关于终点 v 的依赖如何被控制，尤其是凸性、消去或无关性论证不能跳步。"
+                "D4 contract: explain how dependence on the terminal point v is controlled. In particular, arguments based on convexity, cancellation, or irrelevance must not skip steps."
             ),
             "Q5": (
-                "Q5 合同: 必须把可解析部分与需要数值证书的部分分开写；只要数值证书未验证通过，就不能视为该性质完成。"
+                "Q5 contract: separate the analytically proved part from the part that still requires a numeric certificate. Until the numeric certificate is verified, the property is not complete."
             ),
             "Q6": (
-                "Q6 合同: 必须围绕极端链/极端配置给出下界分析，不要把一般情形直觉误当成极端链结论。"
-                "应直接给出极端链下界的数学论证，并明确最危险的边界配置。"
-                "若没有写出明确常数链条（新常数如何进入下界比例、Lemma 3 型估计、以及与 rho/lambda 的关系），"
-                "不得声称“可压到 1.98”“支持 rho < 1.98”或“允许更小全局上界”；此时 Conclusion 只能写候选方向或局部约束。"
-                "Q6 默认由大模型 reviewer 做逻辑审查，不要求生成工具验证协议。"
+                "Q6 contract: give a lower-bound analysis for the extreme chain or extreme configuration. Do not confuse general-case intuition with an extreme-chain conclusion. "
+                "Provide the mathematical lower-bound argument directly and identify the most dangerous boundary configuration. "
+                "If you do not write an explicit constant chain showing how the new constants enter the lower-bound ratio, the Lemma-3-type estimate, and the rho/lambda relation, "
+                "you may not claim that the bound can be pushed to 1.98, support rho < 1.98, or allow a smaller global upper bound. In that case, the Conclusion may only state a candidate direction or a local constraint. "
+                "Q6 is reviewed logically by the large-model reviewers by default and does not require a tool-verification protocol."
             ),
         }
         return guidance.get(property_name, "")
@@ -925,10 +925,9 @@ class AutonomousResearchSystem:
             return ""
         return (
             "[REJECT]\n"
-            "致命问题: 当前 Q6 草稿在 Claim/Conclusion 中声称“可压到 1.98”或等价的全局上界改进，"
-            "但 Derivation/Boundary Cases 没有写出足够明确的常数链条，无法说明新常数如何进入极端链下界、"
-            "Lemma 3 型估计以及 rho/lambda 关系。\n"
-            "修复要求: 删除该全局改进结论，或补出完整常数链条后再声称 1.98 / rho < 1.98。"
+            "Fatal issue: the current Q6 draft claims a 1.98-level improvement or an equivalent global upper-bound improvement in the Claim/Conclusion, "
+            "but the Derivation/Boundary Cases do not provide a sufficiently explicit constant chain showing how the new constants enter the extreme-chain lower bound, the Lemma-3-type estimate, and the rho/lambda relation.\n"
+            "Required repair: remove the global-improvement claim, or supply the full constant chain before claiming 1.98 / rho < 1.98."
         )
 
     def _record_terminal_candidate(self, candidate, bucket):
@@ -1011,26 +1010,26 @@ class AutonomousResearchSystem:
             max_chars=7000,
         )
         prompt = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
-            f"最新终态候选报告:\n{terminal_report}\n\n"
-            f"近期终态候选摘要:\n{recent_summary or '[暂无]'}\n\n"
-            f"当前统计: passed={len(passed_candidates)}, pruned={len(pruned_candidates)}, remaining_budget={remaining_budget}\n\n"
-            "请输出 JSON 对象，字段必须包括：action, rationale, next_direction, stage。\n"
-            "其中 action 只能取：continue_exploring, proof_refinement, stop。\n"
-            "规则：\n"
-            "1) 若最新候选已通过全部性质，但仍有明显优化空间，可选 continue_exploring；\n"
-            "2) 若最新候选已通过且更适合转入证明完善阶段，可选 proof_refinement；\n"
-            "3) 若当前搜索应停止，可选 stop；\n"
-            "4) 只有 action=continue_exploring 时，next_direction 才应非空，并且必须具体；\n"
-            "5) <POST_TERMINAL_DECISION> 标签内只能放 JSON 对象。"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Latest terminal candidate report:\n{terminal_report}\n\n"
+            f"Recent terminal-candidate summary:\n{recent_summary or '[none]'}\n\n"
+            f"Current stats: passed={len(passed_candidates)}, pruned={len(pruned_candidates)}, remaining_budget={remaining_budget}\n\n"
+            "Output a JSON object with the fields: action, rationale, next_direction, stage.\n"
+            "The action field must be one of: continue_exploring, proof_refinement, stop.\n"
+            "Rules:\n"
+            "1) If the latest candidate passed all properties but there is still clear room for improvement, choose continue_exploring.\n"
+            "2) If the latest candidate passed and is better suited for proof refinement, choose proof_refinement.\n"
+            "3) If the search should stop, choose stop.\n"
+            "4) Only when action=continue_exploring may next_direction be non-empty, and it must be specific.\n"
+            "5) Inside <POST_TERMINAL_DECISION>, output only a JSON object."
         )
         try:
             raw_decision = self._parse_json_object(
                 orchestrator.call_llm_tagged(
                     prompt,
                     tag_name="POST_TERMINAL_DECISION",
-                    content_hint="标签内必须是合法 JSON 对象。",
+                    content_hint="The tag content must be a valid JSON object.",
                     print_stream=True,
                 )
             )
@@ -1056,38 +1055,38 @@ class AutonomousResearchSystem:
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
-            query=f"{goal}\n{terminal_report}\n候选设计方向\nN1 N2 N3 D4 Q5 Q6",
+            query=f"{goal}\n{terminal_report}\ncandidate design direction\nN1 N2 N3 D4 Q5 Q6",
             top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=12000,
             summary_max_chars=5000,
         )
         prompt_header = (
-            "请给出首轮探索方向。"
+            "Give the initial exploration direction."
             if is_initial
-            else "请基于最新终态报告给出下一轮探索方向。"
+            else "Give the next exploration direction based on the latest terminal report."
         )
         terminal_block = (
-            f"最新终态报告:\n{terminal_report}\n\n"
+            f"Latest terminal report:\n{terminal_report}\n\n"
             if str(terminal_report or "").strip()
             else ""
         )
         prompt = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
             f"{terminal_block}"
-            f"近期终态候选摘要:\n{terminal_reports or '[暂无终态候选]'}\n\n"
-            f"候选历史摘要:\n{memory_summary or '[暂无历史候选]'}\n\n"
+            f"Recent terminal-candidate summary:\n{terminal_reports or '[no terminal candidates yet]'}\n\n"
+            f"Historical candidate summary:\n{memory_summary or '[no historical candidates yet]'}\n\n"
             f"{prompt_header}\n"
-            "请给出下一条最值得探索的势函数设计方向，重点回答：\n"
-            "1) 下一轮应该优先尝试什么势函数族或参数调整；\n"
-            "2) 为什么它比历史失败路径更有希望；\n"
-            "3) 下一轮最先检查哪个性质，以及为什么。\n"
-            "请在 <DIRECTION> 标签内输出 3-8 行的具体方向说明。"
+            "Provide the single most worthwhile next potential-function design direction. Address:\n"
+            "1) which potential-function family or parameter adjustment should be tried next;\n"
+            "2) why it is more promising than the historical failure paths;\n"
+            "3) which property should be checked first next round, and why.\n"
+            "Inside <DIRECTION>, output 3-8 lines of concrete guidance."
         )
         return orchestrator.call_llm_tagged(
             prompt,
             tag_name="DIRECTION",
-            content_hint="输出简洁、具体的下一轮设计方向。",
+            content_hint="Output concise, specific next-round design guidance.",
             print_stream=True,
         ).strip()
 
@@ -1098,30 +1097,31 @@ class AutonomousResearchSystem:
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
-            query=f"{goal}\n{direction}\n新势函数候选\n{' '.join(self.property_order)}",
+            query=f"{goal}\n{direction}\nnew potential-function candidate\n{' '.join(self.property_order)}",
             top_k=LITERATURE_RAG_TOP_K,
             snippet_max_chars=12000,
             summary_max_chars=5000,
         )
         prompt = (
-            f"研究目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
-            f"当前方向:\n{direction}\n\n"
-            f"历史候选摘要:\n{memory_summary or '[暂无历史候选]'}\n\n"
-            "请提出一个新的势函数候选，并输出 JSON 对象，字段必须包括：\n"
+            f"Research goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Current direction:\n{direction}\n\n"
+            f"Historical candidate summary:\n{memory_summary or '[no historical candidates yet]'}\n\n"
+            "Propose one new potential-function candidate and output a JSON object with the fields:\n"
             "candidate_id, form, derived_from, intuition, predicted_properties。\n"
-            "其中 predicted_properties 必须是对象，键仅可使用 N1,N2,N3,D4,Q5,Q6；每个值为一段简短判断，说明该性质大概率通过/困难点。\n"
-            "要求：\n"
-            "1) form 必须给出明确的数学形式，而不是泛泛建议；\n"
-            "2) intuition 必须说明与已有候选相比，为什么值得试；\n"
-            "3) 若只是微调历史候选，要在 derived_from 中写明来源；\n"
-            "4) <CANDIDATE_JSON> 标签内只能放 JSON 对象，不得输出额外解释。"
+            "predicted_properties must be an object whose keys are limited to N1,N2,N3,D4,Q5,Q6; each value must be a short assessment of why the property seems promising or where the main difficulty lies.\n"
+            "Requirements:\n"
+            "1) form must give an explicit mathematical form, not a generic suggestion.\n"
+            "2) intuition must explain why this candidate is worth trying relative to existing candidates.\n"
+            "3) If this is only a refinement of an earlier candidate, state that source clearly in derived_from.\n"
+            "4) Do not write 'verified', 'pass', or any equivalent wording that pretends the property is already proved; keep predicted_properties at the level of informed conjecture or anticipated difficulty.\n"
+            "5) Inside <CANDIDATE_JSON>, output only a JSON object with no extra explanation."
         )
         payload = self._parse_json_object(
             potential_designer.call_llm_tagged(
                 prompt,
                 tag_name="CANDIDATE_JSON",
-                content_hint="标签内必须是合法 JSON 对象。",
+                content_hint="The tag content must be a valid JSON object.",
             )
         )
         candidate_id = str(payload.get("candidate_id", "")).strip() or f"candidate_{candidate_index:03d}"
@@ -1154,26 +1154,26 @@ class AutonomousResearchSystem:
             summary_max_chars=2200,
         )
         prompt = (
-            f"研究目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=9000)}\n\n"
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"设计动机: {candidate.intuition}\n"
-            f"来源方向: {candidate.source_direction}\n\n"
-            f"候选/性质记忆:\n{planning_memory or '[暂无]'}\n\n"
-            "请输出 JSON 对象，字段必须包括：\n"
+            f"Research goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Design intuition: {candidate.intuition}\n"
+            f"Source direction: {candidate.source_direction}\n\n"
+            f"Candidate/property memory:\n{planning_memory or '[none]'}\n\n"
+            "Output a JSON object with the fields:\n"
             "reusable_props, needs_redo, priority, risk_notes, estimated_c, obvious_failure。\n"
-            "其中 obvious_failure 必须是对象，包含 status, property, reason 三个字段；若无显然失败则 status=false。\n"
-            "要求：\n"
-            "1) priority 必须按最合适的验证顺序排列，优先必要条件；\n"
-            "2) 若某性质在规划阶段即可判定明显失败，直接在 obvious_failure 中给出；\n"
-            "3) <PROOF_PLAN_JSON> 标签内只能放 JSON 对象。"
+            "obvious_failure must be an object with the fields status, property, reason; if there is no obvious failure then status=false.\n"
+            "Requirements:\n"
+            "1) priority must be ordered by the best validation sequence, prioritizing necessary conditions;\n"
+            "2) if some property is already obviously impossible at planning time, state it directly in obvious_failure;\n"
+            "3) Inside <PROOF_PLAN_JSON>, output only a JSON object."
         )
         payload = self._parse_json_object(
             proof_planner.call_llm_tagged(
                 prompt,
                 tag_name="PROOF_PLAN_JSON",
-                content_hint="标签内必须是合法 JSON 对象。",
+                content_hint="The tag content must be a valid JSON object.",
             )
         )
         candidate.reusable_props = [
@@ -1221,7 +1221,7 @@ class AutonomousResearchSystem:
         ]
         for item in similar:
             lines.append(
-                f"- 相似失败 {item.candidate_id}: form={item.form}; pruned_reason={item.pruned_reason or '[缺失]'}"
+                f"- Similar failure {item.candidate_id}: form={item.form}; pruned_reason={item.pruned_reason or '[missing]'}"
             )
         return "\n".join(line for line in lines if line).strip()
 
@@ -1250,7 +1250,7 @@ class AutonomousResearchSystem:
                 max_chars=900,
             )
             if packet:
-                parts.append(f"[{prop} proposition 记忆]\n{packet}")
+                parts.append(f"[{prop} proposition memory]\n{packet}")
         return self._truncate_for_prompt("\n\n".join(part for part in parts if part), max_chars=6500)
 
     def _property_memory_context(self, candidate, property_name):
@@ -1265,7 +1265,7 @@ class AutonomousResearchSystem:
             return base_context
         return "\n\n".join(
             part
-            for part in [base_context, f"[{property_name} proposition 级历史知识]\n{property_packet}"]
+            for part in [base_context, f"[{property_name} proposition-level historical knowledge]\n{property_packet}"]
             if part
         ).strip()
 
@@ -1300,19 +1300,19 @@ class AutonomousResearchSystem:
     def _proposition_dependency_context(self, candidate, property_name, proposition):
         dep_ids = [str(dep).strip() for dep in proposition.get("dependencies") or [] if str(dep).strip()]
         if not dep_ids:
-            return "[无]"
+            return "[none]"
         items = candidate.proposition_items(property_name)
         lines = []
         for dep_id in dep_ids:
             entry = items.get(dep_id) or {}
             artifact = candidate.artifacts.get(str(entry.get("artifact_key", "")).strip(), "")
             conclusion = self._extract_markdown_section(artifact, "Conclusion") if artifact else ""
-            note = conclusion or str(entry.get("note", "")).strip() or "[无结论摘要]"
+            note = conclusion or str(entry.get("note", "")).strip() or "[no conclusion summary]"
             lines.append(
                 f"- {dep_id}: status={entry.get('status', 'unknown')}; "
                 f"title={entry.get('title', dep_id) or dep_id}; note={note}"
             )
-        return "\n".join(lines).strip() or "[无]"
+        return "\n".join(lines).strip() or "[none]"
 
     def _default_candidate_progress_decision(self, candidate):
         remaining = self._remaining_candidate_properties(candidate, self.property_order)
@@ -1403,34 +1403,34 @@ class AutonomousResearchSystem:
             summary_max_chars=3500,
         )
         prompt = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"设计动机: {candidate.intuition or '[缺失]'}\n"
-            f"主要风险: {candidate.risk_notes or '[暂无]'}\n"
-            f"当前性质快照: {self._candidate_property_snapshot(candidate)}\n"
-            f"刚刚完成的性质: {last_property}\n"
-            f"剩余未通过性质: {', '.join(remaining) or '[无]'}\n\n"
-            f"相关性质记忆:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=12000) or '[暂无]'}\n\n"
-            "你现在是探索层内部的本地 proof planner。"
-            "请基于当前候选的局部进展，决定下一步在该候选内部该做什么。"
-            "输出 JSON 对象，字段必须包括：action, next_property, updated_priority, rationale, risk_update。\n"
-            "规则：\n"
-            "1) action 只能取 continue_candidate, prune_candidate, complete_candidate；\n"
-            "2) 只有当所有六个性质都已通过时，才能输出 complete_candidate；\n"
-            "3) 若存在明显跨性质张力，说明当前候选应在本地提前放弃，可输出 prune_candidate；\n"
-            "4) next_property 和 updated_priority 只能使用剩余未通过的性质名；\n"
-            "5) updated_priority 必须是字符串数组，表示本候选内部后续验证顺序；\n"
-            "6) risk_update 应简短更新当前候选最值得警惕的风险；\n"
-            "7) <LOCAL_PLANNER_DECISION> 标签内只能放 JSON 对象。"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Design intuition: {candidate.intuition or '[missing]'}\n"
+            f"Main risk: {candidate.risk_notes or '[none]'}\n"
+            f"Current property snapshot: {self._candidate_property_snapshot(candidate)}\n"
+            f"Property just completed: {last_property}\n"
+            f"Remaining unpassed properties: {', '.join(remaining) or '[none]'}\n\n"
+            f"Relevant property memory:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=12000) or '[none]'}\n\n"
+            "You are now the local proof planner inside the exploration loop. "
+            "Based on the candidate's local progress, decide what should happen next within this candidate.\n"
+            "Output a JSON object with the fields: action, next_property, updated_priority, rationale, risk_update.\n"
+            "Rules:\n"
+            "1) action must be one of continue_candidate, prune_candidate, complete_candidate;\n"
+            "2) complete_candidate may be used only if all six properties have passed;\n"
+            "3) if there is clear cross-property tension showing the candidate should be abandoned early, use prune_candidate;\n"
+            "4) next_property and updated_priority may only use names of remaining unpassed properties;\n"
+            "5) updated_priority must be a string array describing the subsequent validation order within this candidate;\n"
+            "6) risk_update should briefly state the most important current risk;\n"
+            "7) Inside <LOCAL_PLANNER_DECISION>, output only a JSON object."
         )
         try:
             raw = self._parse_json_object(
                 proof_planner.call_llm_tagged(
                     prompt,
                     tag_name="LOCAL_PLANNER_DECISION",
-                    content_hint="标签内必须是合法 JSON 对象。",
+                    content_hint="The tag content must be a valid JSON object.",
                     print_stream=True,
                 )
             )
@@ -1535,33 +1535,33 @@ class AutonomousResearchSystem:
             summary_max_chars=5000,
         )
         prompt = (
-            f"研究目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"当前性质: {property_name}\n"
-            f"设计动机: {candidate.intuition}\n"
-            f"当前性质合同:\n{property_guidance or '[无]'}\n\n"
-            f"候选历史/性质记忆:\n{memory_context or '[暂无]'}\n\n"
-            f"历史可复用 proposition 模板:\n{reuse_context or '[暂无]'}\n\n"
-            "请把当前性质拆成 1-4 个可单独审查的 proposition，并输出 JSON 数组。\n"
-            "每个元素必须包含字段：id, title, claim, dependencies, verification_focus, requires_tool, tool_plan。\n"
-            "规则：\n"
-            "1) proposition 必须足够局部，能被 reviewer 单独判定通过/失败；\n"
-            "2) dependencies 必须是字符串数组，引用当前性质内部更早的 proposition id；\n"
-            "3) verification_focus 必须明确 reviewer 最该检查的数学脆弱点；\n"
-            "4) 只有 Q5 中真正承载一维数值证书的 proposition 才能 requires_tool=true；其它性质必须 false；\n"
-            "5) tool_plan 必须是对象；若 requires_tool=true，则 tool_plan 至少写出 should_request, preferred_mode, goal, must_certify；\n"
-            "6) 若 requires_tool=false，则 tool_plan 应为空对象，或明确 should_request=false；\n"
-            "7) 不得把多个性质混在同一个 proposition 里；\n"
-            "8) <PROPERTY_PROPOSITIONS> 标签内只能放 JSON 数组。"
+            f"Research goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Current property: {property_name}\n"
+            f"Design intuition: {candidate.intuition}\n"
+            f"Current property contract:\n{property_guidance or '[none]'}\n\n"
+            f"Candidate/property memory:\n{memory_context or '[none]'}\n\n"
+            f"Reusable historical proposition templates:\n{reuse_context or '[none]'}\n\n"
+            "Decompose the current property into 1-4 propositions that can be reviewed independently, and output a JSON array.\n"
+            "Each element must contain: id, title, claim, dependencies, verification_focus, requires_tool, tool_plan.\n"
+            "Rules:\n"
+            "1) each proposition must be local enough that a reviewer can judge it independently as pass or fail;\n"
+            "2) dependencies must be a string array referencing earlier proposition ids within the current property;\n"
+            "3) verification_focus must identify the mathematically fragile point the reviewer should inspect most carefully;\n"
+            "4) only a proposition inside Q5 that truly carries a one-dimensional numeric certificate may set requires_tool=true; all other properties must use false;\n"
+            "5) tool_plan must be an object; if requires_tool=true, tool_plan must at least include should_request, preferred_mode, goal, must_certify;\n"
+            "6) if requires_tool=false, tool_plan should be empty or explicitly set should_request=false;\n"
+            "7) do not mix multiple properties into one proposition;\n"
+            "8) Inside <PROPERTY_PROPOSITIONS>, output only a JSON array."
         )
         try:
             payload = self._parse_json_array(
                 proof_planner.call_llm_tagged(
                     prompt,
                     tag_name="PROPERTY_PROPOSITIONS",
-                    content_hint="标签内必须是合法 JSON 数组。",
+                    content_hint="The tag content must be a valid JSON array.",
                 )
             )
         except Exception as exc:
@@ -1629,12 +1629,12 @@ class AutonomousResearchSystem:
     ):
         proposition_id = str(proposition.get("id", "")).strip() or f"{property_name.lower()}_prop"
         proposition_title = str(proposition.get("title", "")).strip() or proposition_id
-        proposition_claim = str(proposition.get("claim", "")).strip() or "[缺失]"
+        proposition_claim = str(proposition.get("claim", "")).strip() or "[missing]"
         tool_plan = proposition.get("tool_plan") or {}
         verification_needs = self._truncate_for_prompt(
             self._extract_markdown_section(draft, "Verification Needs"),
             max_chars=2400,
-        ) or "[未显式给出]"
+        ) or "[not explicitly stated]"
         verification_closed = self._verification_needs_is_none(verification_needs)
         tool_reuse_context = self._tool_request_reuse_context(
             candidate,
@@ -1655,49 +1655,49 @@ class AutonomousResearchSystem:
         )
         clean_draft = self._strip_tool_reports(draft)
         prompt = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=18000)}\n\n"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
             f"{property_context}\n"
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"当前性质: {property_name}\n"
-            f"当前性质合同:\n{property_guidance or '[无]'}\n\n"
-            "当前 proposition:\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Current property: {property_name}\n"
+            f"Current property contract:\n{property_guidance or '[none]'}\n\n"
+            "Current proposition:\n"
             f"- ID: {proposition_id}\n"
             f"- Title: {proposition_title}\n"
             f"- Claim: {proposition_claim}\n"
-            f"- Verification Focus: {str(proposition.get('verification_focus', '')).strip() or '[缺失]'}\n"
+            f"- Verification Focus: {str(proposition.get('verification_focus', '')).strip() or '[missing]'}\n"
             f"- Planner Says Requires Tool: {'yes' if self._parse_bool_flag(proposition.get('requires_tool')) else 'no'}\n\n"
             f"Planner Tool Plan:\n{self._render_tool_plan(tool_plan)}\n\n"
-            f"当前 proposition 草稿:\n{self._truncate_for_prompt(clean_draft, max_chars=24000)}\n\n"
-            f"当前草稿中的 Verification Needs:\n{verification_needs}\n\n"
-            f"历史可复用 tool request 模板:\n{tool_reuse_context or '[暂无]'}\n\n"
-            "请判断当前 proposition 是否需要调用外部工具，并输出 JSON 数组。若不需要任何工具，输出 []。\n"
-            "每个元素必须包含字段：request_id, tool_name, justification, spec。\n"
-            "规则：\n"
-            "1) 只有当工具能直接关闭当前 proposition 中尚未闭合的 Verification Needs 时，才可以请求工具；\n"
-            "1.1) 只有当 `Verification Needs` 严格等于 `None` 时，才允许输出 []；\n"
-            "1.2) 若 `Verification Needs` 不是 `None`，则禁止输出 []，必须给出至少一个可执行的 tool request；\n"
-            "2) 当前系统支持的 tool_name 只有 verification；\n"
-            "3) spec 必须是 verification_tools 可执行的 JSON 对象；支持 mode=numeric_1d 或 mode=symbolic_multivar；\n"
-            "4) 若 mode=numeric_1d，则 spec 必须包含 status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes；\n"
-            "5) 若 mode=symbolic_multivar，则 spec 必须包含 status, mode, variables, assumptions, simplifications, partial_derivatives, inequality_checks, substitutions, notes；\n"
-            "5.1) partial_derivatives 中每个元素必须包含 expression 和 wrt 两个字段；字段名必须严格写成 wrt，不得写 with_respect_to 或其他别名；\n"
-            "5.2) inequality_checks 中每个元素必须把比较拆成 expression, relation, threshold 三个字段；例如要验证 f(x) > 0，应写成 {\"expression\": \"f(x)\", \"relation\": \">\", \"threshold\": 0}；不得把 >、<、>=、<=、== 直接写进 expression；\n"
-            "5.3) symbolic_multivar 的合法最小示例：partial_derivatives=[{\"expression\":\"cos(theta)/(cos(alpha)-cos(gamma))\",\"wrt\":\"alpha\"}]，inequality_checks=[{\"expression\":\"cos(theta)*sin(alpha)/(cos(alpha)-cos(gamma))**2\",\"relation\":\">\",\"threshold\":0}]；\n"
-            "6) expression 必须是 Python 数学表达式，只能使用变量名和 sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e，不得使用 LaTeX，也不得在 expression 中写比较符号；\n"
-            "7) 不得虚构文献里不存在的公式；如果只是候选表达式或近似重写，必须在 justification 或 notes 中明确承认；\n"
-            "8) 对 Q5，如果 proposition 的关键缺口是局部一维数值证书，应优先请求 numeric_1d；只有在确实需要符号偏导/符号不等式时才用 symbolic_multivar；\n"
-            "9) 若 `Verification Needs` 不是 `None`，你不能因为无法给出 spec 就输出 []；此时必须尽力给出最可执行的 spec；\n"
-            "10) 输出前请自检：partial_derivatives 是否使用 wrt；inequality_checks 是否使用 expression/relation/threshold；\n"
-            "11) <TOOL_REQUESTS> 标签内只能放 JSON 数组。"
+            f"Current proposition draft:\n{self._truncate_for_prompt(clean_draft, max_chars=24000)}\n\n"
+            f"Verification Needs in the current draft:\n{verification_needs}\n\n"
+            f"Reusable historical tool-request templates:\n{tool_reuse_context or '[none]'}\n\n"
+            "Decide whether the current proposition needs an external tool call, and output a JSON array. If no tool is needed, output [].\n"
+            "Each element must contain: request_id, tool_name, justification, spec.\n"
+            "Rules:\n"
+            "1) You may request a tool only if it directly closes an unresolved Verification Need in the current proposition;\n"
+            "1.1) Only when `Verification Needs` is exactly `None` may you output [];\n"
+            "1.2) If `Verification Needs` is not `None`, [] is forbidden; you must give at least one executable tool request;\n"
+            "2) The only supported tool_name is verification;\n"
+            "3) spec must be a JSON object executable by verification_tools, using mode=numeric_1d or mode=symbolic_multivar;\n"
+            "4) For mode=numeric_1d, spec must contain status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes;\n"
+            "5) For mode=symbolic_multivar, spec must contain status, mode, variables, assumptions, simplifications, partial_derivatives, inequality_checks, substitutions, notes;\n"
+            "5.1) Every item in partial_derivatives must contain expression and wrt; the field name must be exactly wrt and may not be replaced by with_respect_to or any alias;\n"
+            "5.2) Every item in inequality_checks must split comparisons into expression, relation, threshold; for example, to verify f(x) > 0, write {\"expression\": \"f(x)\", \"relation\": \">\", \"threshold\": 0}; do not put >, <, >=, <=, == directly inside expression;\n"
+            "5.3) Minimal valid symbolic_multivar example: partial_derivatives=[{\"expression\":\"cos(theta)/(cos(alpha)-cos(gamma))\",\"wrt\":\"alpha\"}], inequality_checks=[{\"expression\":\"cos(theta)*sin(alpha)/(cos(alpha)-cos(gamma))**2\",\"relation\":\">\",\"threshold\":0}];\n"
+            "6) expression must be a Python mathematical expression using only variable names and sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e; do not use LaTeX and do not put comparison operators inside expression;\n"
+            "7) Do not invent formulas not present in the paper or current candidate. If an expression is only a candidate rewrite or approximation, say so explicitly in justification or notes;\n"
+            "8) For Q5, if the key gap is a local one-dimensional numeric certificate, prefer numeric_1d. Use symbolic_multivar only when symbolic partial derivatives or symbolic inequalities are genuinely needed;\n"
+            "9) If `Verification Needs` is not `None`, you may not output [] merely because the spec is hard to write; instead, provide the most executable spec you can;\n"
+            "10) Before output, self-check whether partial_derivatives uses wrt and whether inequality_checks uses expression/relation/threshold;\n"
+            "11) Inside <TOOL_REQUESTS>, output only a JSON array."
         )
         try:
             payload = self._parse_json_array(
                 proof_writer.call_llm_tagged(
                     prompt,
                     tag_name="TOOL_REQUESTS",
-                    content_hint="标签内必须是合法 JSON 数组。",
+                    content_hint="The tag content must be a valid JSON array.",
                     print_stream=True,
                 )
             )
@@ -1905,9 +1905,9 @@ class AutonomousResearchSystem:
         property_guidance,
     ):
         proposition_title = str(proposition.get("title", "")).strip() or proposition.get("id", "proposition")
-        proposition_claim = str(proposition.get("claim", "")).strip() or "[缺失]"
-        verification_focus = str(proposition.get("verification_focus", "")).strip() or "[缺失]"
-        dependencies = ", ".join(proposition.get("dependencies") or []) or "[无]"
+        proposition_claim = str(proposition.get("claim", "")).strip() or "[missing]"
+        verification_focus = str(proposition.get("verification_focus", "")).strip() or "[missing]"
+        dependencies = ", ".join(proposition.get("dependencies") or []) or "[none]"
         requires_tool = self._parse_bool_flag(proposition.get("requires_tool")) if property_name == "Q5" else False
         tool_plan = proposition.get("tool_plan") or {}
         proposition_meta = {
@@ -1943,13 +1943,13 @@ class AutonomousResearchSystem:
             max_chars=4200,
         )
         prompt_base = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
             f"{property_context}\n"
-            f"候选历史/性质记忆:\n{memory_context or '[暂无]'}\n\n"
-            f"当前性质合同:\n{property_guidance or '[无额外合同]'}\n\n"
-            f"历史可复用 proposition 模板:\n{reuse_context or '[暂无]'}\n\n"
-            "当前 proposition:\n"
+            f"Candidate/property memory:\n{memory_context or '[none]'}\n\n"
+            f"Current property contract:\n{property_guidance or '[no additional contract]'}\n\n"
+            f"Reusable historical proposition templates:\n{reuse_context or '[none]'}\n\n"
+            "Current proposition:\n"
             f"- ID: {proposition.get('id', '[missing]')}\n"
             f"- Title: {proposition_title}\n"
             f"- Claim: {proposition_claim}\n"
@@ -1957,26 +1957,25 @@ class AutonomousResearchSystem:
             f"- Verification Focus: {verification_focus}\n"
             f"- Requires Tool: {'yes' if requires_tool else 'no'}\n\n"
             f"- Planned Tool Plan: {self._render_tool_plan(tool_plan)}\n\n"
-            f"当前候选内部依赖 proposition 摘要:\n{dependency_context}\n\n"
-            "请只针对当前 proposition 输出证明草稿，严格使用以下 Markdown 骨架：\n"
+            f"Dependent proposition summary inside the current candidate:\n{dependency_context}\n\n"
+            "Write a proof draft only for the current proposition, using exactly the following Markdown skeleton:\n"
             "## Assumptions\n"
             "## Claim\n"
             "## Derivation\n"
             "## Boundary Cases\n"
             "## Verification Needs\n"
             "## Conclusion\n"
-            "要求：\n"
-            "1) 只能证明当前 proposition，不得一次性声称整个性质或全局上界已经完成；\n"
-            "2) 若 proposition 依赖更早的 proposition，只能把这些依赖当作已通过的局部前提，不得跳过新的关键步骤；\n"
-            "3) 若 Requires Tool=yes，必须明确区分已证明部分与仍需数值验证的部分。\n"
-            "4) `## Verification Needs` 必须使用严格标准格式：若当前 proposition 已闭合，唯一允许内容是 `None`；"
-            "若仍有未闭合验证项，只能逐行输出 `- ...` 列表，不得写自然语言段落，不得写“无需额外的数值或符号验证”这类句子。\n"
-            f"{'5) Q6 额外硬约束: 若没有写出明确常数链条（新常数如何进入极端链下界、Lemma 3 型估计以及 rho/lambda 关系），不得声称“可压到 1.98”“支持 rho < 1.98”或“允许更小全局上界”；未闭合时 Conclusion 只能写候选方向或局部约束。' if property_name == 'Q6' else ''}"
+            "Requirements:\n"
+            "1) Prove only the current proposition; do not claim that the whole property or the global upper bound is already finished;\n"
+            "2) If the proposition depends on earlier propositions, you may treat those dependencies only as passed local premises; do not skip the new critical step;\n"
+            "3) If Requires Tool=yes, clearly separate the proved part from the part that still needs numeric verification.\n"
+            "4) `## Verification Needs` must use a strict standard format: if the current proposition is closed, the only allowed content is `None`; if unresolved verification remains, you may only output a line-by-line `- ...` list, with no prose paragraph and no sentence such as 'no additional numeric or symbolic verification is needed'.\n"
+            f"{'5) Extra hard constraint for Q6: if you do not write an explicit constant chain showing how the new constants enter the extreme-chain lower bound, the Lemma-3-type estimate, and the rho/lambda relation, you may not claim that the bound can be pushed to 1.98, support rho < 1.98, or allow a smaller global upper bound. While unresolved, the Conclusion may state only a candidate direction or a local constraint.' if property_name == 'Q6' else ''}"
         )
         draft = proof_writer.call_llm_tagged(
             prompt_base,
             tag_name="PROPOSITION_PROOF",
-            content_hint="必须包含 Assumptions/Claim/Derivation/Boundary Cases/Verification Needs/Conclusion 六节。",
+            content_hint="The output must contain the six sections Assumptions/Claim/Derivation/Boundary Cases/Verification Needs/Conclusion.",
         )
         draft = self._normalize_verification_needs_section(draft)
 
@@ -2029,10 +2028,10 @@ class AutonomousResearchSystem:
                     final_feedback = q6_feedback
                     current_round_pass = False
                     draft = proof_writer.call_llm_tagged(
-                        f"{prompt_base}\n\n当前草稿:\n{draft}\n\n修正反馈:\n{q6_feedback}\n\n"
-                        "请仅修复被指出的致命问题，保持六节骨架不变；若当前 proposition 结论过强，缩小到真正成立的范围。",
+                        f"{prompt_base}\n\nCurrent draft:\n{draft}\n\nRevision feedback:\n{q6_feedback}\n\n"
+                        "Repair only the fatal issue identified above. Keep the six-section skeleton unchanged. If the current proposition conclusion is too strong, narrow it to the range actually supported.",
                         tag_name="PROPOSITION_PROOF",
-                        content_hint="输出修订后的完整 proposition 草稿，并保留六节固定结构。",
+                        content_hint="Output the full revised proposition draft and preserve the fixed six-section structure.",
                     )
                     draft = self._normalize_verification_needs_section(draft)
                     draft, tool_reports, tool_certified = self._apply_proposition_tool_requests(
@@ -2078,16 +2077,16 @@ class AutonomousResearchSystem:
             for reviewer in self.candidate_reviewers:
                 review_context = (
                     f"{property_context}\n"
-                    f"当前 proposition: {proposition_title}\n"
+                    f"Current proposition: {proposition_title}\n"
                     f"Claim: {proposition_claim}\n"
                     f"Dependencies: {dependencies}\n"
-                    f"研究目标: {goal}"
+                    f"Research goal: {goal}"
                 )
                 review_directive = self._generate_reviewer_directive(
                     reviewer,
                     review_context,
                     draft,
-                    stage_label=f"{candidate.candidate_id}:{property_name}:{proposition.get('id', 'prop')}:评审第{attempt + 1}轮",
+                    stage_label=f"{candidate.candidate_id}:{property_name}:{proposition.get('id', 'prop')}:review_round_{attempt + 1}",
                 )
                 verdict, feedback = reviewer.check(draft, review_context, review_directive=review_directive)
                 if verdict:
@@ -2095,10 +2094,10 @@ class AutonomousResearchSystem:
                 final_feedback = feedback
                 current_round_pass = False
                 draft = proof_writer.call_llm_tagged(
-                    f"{prompt_base}\n\n当前草稿:\n{draft}\n\n修正反馈:\n{feedback}\n\n"
-                    "请仅修复被指出的致命问题，保持六节骨架不变；若当前 proposition 结论过强，缩小到真正成立的范围。",
+                    f"{prompt_base}\n\nCurrent draft:\n{draft}\n\nRevision feedback:\n{feedback}\n\n"
+                    "Repair only the fatal issue identified by the reviewer. Keep the six-section skeleton unchanged. If the proposition conclusion is too strong, narrow it to the range actually supported.",
                     tag_name="PROPOSITION_PROOF",
-                    content_hint="输出修订后的完整 proposition 草稿，并保留六节固定结构。",
+                    content_hint="Output the full revised proposition draft and preserve the fixed six-section structure.",
                 )
                 draft = self._normalize_verification_needs_section(draft)
                 draft, tool_reports, tool_certified = self._apply_proposition_tool_requests(
@@ -2197,13 +2196,13 @@ class AutonomousResearchSystem:
 
     def _run_candidate_property(self, candidate, property_name, goal, literature_context):
         property_context = (
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"当前性质: {property_name}\n"
-            f"设计动机: {candidate.intuition}\n"
-            f"可复用部分: {', '.join(candidate.reusable_props) or '[暂无]'}\n"
-            f"需重写部分: {', '.join(candidate.needs_redo) or '[暂无]'}\n"
-            f"主要风险: {candidate.risk_notes or '[暂无]'}\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Current property: {property_name}\n"
+            f"Design intuition: {candidate.intuition}\n"
+            f"Reusable parts: {', '.join(candidate.reusable_props) or '[none]'}\n"
+            f"Parts that need rewriting: {', '.join(candidate.needs_redo) or '[none]'}\n"
+            f"Main risk: {candidate.risk_notes or '[none]'}\n"
         )
         memory_context = self._property_memory_context(candidate, property_name)
         property_guidance = self._property_guidance(property_name)
@@ -2277,7 +2276,7 @@ class AutonomousResearchSystem:
             artifact = candidate.artifacts.get(artifact_key, "")
             if artifact:
                 property_sections.extend([f"## Property {prop}", "", artifact.strip(), ""])
-        property_bundle = "\n".join(property_sections).strip() or "[暂无性质证明草稿]"
+        property_bundle = "\n".join(property_sections).strip() or "[no property proof drafts available]"
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=(
@@ -2290,40 +2289,38 @@ class AutonomousResearchSystem:
             summary_max_chars=5000,
         )
         prompt_base = (
-            f"总目标: {goal}\n"
-            f"文献关键上下文:\n{self._truncate_for_prompt(literature_packet, max_chars=24000)}\n\n"
-            f"候选 ID: {candidate.candidate_id}\n"
-            f"候选形式: {candidate.form}\n"
-            f"设计动机: {candidate.intuition or '[缺失]'}\n"
+            f"Overall goal: {goal}\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Candidate ID: {candidate.candidate_id}\n"
+            f"Candidate form: {candidate.form}\n"
+            f"Design intuition: {candidate.intuition or '[missing]'}\n"
             f"Estimated C: {candidate.estimated_c or '[unknown]'}\n"
             f"Risk Notes: {candidate.risk_notes or '[none]'}\n"
             f"Property Snapshot: {self._candidate_property_snapshot(candidate)}\n"
             f"Terminal Report:\n{candidate.artifacts.get('terminal_report', '[missing]')}\n\n"
-            "已通过的性质证明材料:\n"
+            "Passed property proof material:\n"
             f"{self._truncate_for_prompt(property_bundle, max_chars=80000)}\n\n"
-            "你现在处于 proof refinement 阶段。请把已经通过的局部性质整理成一份更连贯的候选证明包，"
-            "用于判断这个候选是否值得进入后续人工深挖。"
-            "严格使用以下 Markdown 骨架：\n"
+            "You are now in proof refinement. Organize the already-passed local properties into a more coherent candidate proof package that helps judge whether this candidate deserves further manual deepening.\n"
+            "Use exactly the following Markdown skeleton:\n"
             "## Candidate Statement\n"
             "## Property Map\n"
             "## Reusable Components\n"
             "## Refined Proof Outline\n"
             "## Tight Spots\n"
             "## Next Actions\n"
-            "要求：\n"
-            "1) 只能整理当前候选已经通过的性质，不得虚构未证明的 Proposition；\n"
-            "2) 必须明确最脆弱的两个环节，尤其是 Q5 数值证书和 Q6 极端链下界之间的张力；\n"
-            "3) 若某步仍需人工/额外验证，必须写进 Tight Spots 或 Next Actions；\n"
-            "4) 不得声称最终全局上界已经完全确立，除非材料中已经明确支持；\n"
-            "5) 若没有明确写出来自已通过 Q6 材料的常数链条，不得声称“可压到 1.98”“支持 rho < 1.98”或等价的全局上界改进；\n"
-            "6) <PROOF_REFINEMENT> 标签内只能放完整 Markdown 正文。"
+            "Requirements:\n"
+            "1) Organize only properties that have already passed for the current candidate; do not invent unproved propositions;\n"
+            "2) Make the two most fragile links explicit, especially the tension between the Q5 numeric certificate and the Q6 extreme-chain lower bound;\n"
+            "3) If any step still needs manual or extra verification, it must appear in Tight Spots or Next Actions;\n"
+            "4) Do not claim that the final global upper bound is fully established unless the material explicitly supports that claim;\n"
+            "5) If the passed Q6 material does not explicitly contain the needed constant chain, you may not claim that the bound can be pushed to 1.98, support rho < 1.98, or any equivalent global upper-bound improvement;\n"
+            "6) Inside <PROOF_REFINEMENT>, output only the full Markdown body."
         )
         draft = proof_writer.call_llm_tagged(
             prompt_base,
             tag_name="PROOF_REFINEMENT",
             content_hint=(
-                "必须包含 Candidate Statement/Property Map/Reusable Components/"
-                "Refined Proof Outline/Tight Spots/Next Actions 六节。"
+                "The output must contain the six sections Candidate Statement/Property Map/Reusable Components/Refined Proof Outline/Tight Spots/Next Actions."
             ),
             print_stream=True,
         )
@@ -2342,7 +2339,7 @@ class AutonomousResearchSystem:
                     reviewer,
                     review_context,
                     draft,
-                    stage_label=f"{candidate.candidate_id}:proof_refinement:评审第{attempt + 1}轮",
+                    stage_label=f"{candidate.candidate_id}:proof_refinement:review_round_{attempt + 1}",
                 )
                 verdict, feedback = reviewer.check(draft, review_context, review_directive=review_directive)
                 if verdict:
@@ -2350,10 +2347,10 @@ class AutonomousResearchSystem:
                 current_round_pass = False
                 final_feedback = feedback
                 draft = proof_writer.call_llm_tagged(
-                    f"{prompt_base}\n\n当前 refinement 草稿:\n{draft}\n\n修正反馈:\n{feedback}\n\n"
-                    "请仅修复 reviewer 指出的致命问题，保持六节骨架不变，并明确哪些地方仍然只是候选证明包而非最终定理证明。",
+                    f"{prompt_base}\n\nCurrent refinement draft:\n{draft}\n\nRevision feedback:\n{feedback}\n\n"
+                    "Repair only the fatal issues identified by the reviewer. Keep the six-section skeleton unchanged, and make clear which parts are still only a candidate proof package rather than a final theorem proof.",
                     tag_name="PROOF_REFINEMENT",
-                    content_hint="输出修订后的完整 refinement 草稿，并保留六节固定结构。",
+                    content_hint="Output the full revised refinement draft and preserve the fixed six-section structure.",
                     print_stream=True,
                 )
                 break
