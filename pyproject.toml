@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proof-agent"
+version = "0.1.0"
+description = "Autonomous proof-research agent for computational geometry experiments."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+analysis = [
+  "numpy>=1.26",
+  "sympy>=1.12",
+]
+rag = [
+  "qdrant-client>=1.9",
+  "voyageai>=0.2",
+]
+
+[project.scripts]
+proof-agent-run = "proof_agent.cli.main:main"
+proof-agent-memory = "proof_agent.cli.memory_admin:main"
+proof-agent-memory-web = "proof_agent.cli.memory_admin_web:main"
+proof-agent-convert-pdf = "proof_agent.cli.convert_pdf_to_markdown:main"
+proof-agent-api-status = "proof_agent.cli.test_api_status:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

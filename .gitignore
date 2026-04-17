@@ -1,15 +1,63 @@
-env/
+# Secrets
 .env
-.cache/
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+
+# Python cache / build artifacts
 __pycache__/
 *.pyc
-logs/
-research_output_*.md.env
-research_output_*.md
-__pycache__/
-research_output_*.md
-__pycache__/
-cite_file/
-.venv/
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Tool caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-shm
+*.sqlite-wal
+
+# Runtime / temp files
+runtime/
+tmp/
+nohup.out
+nohup*.out
 *.log
 *.pid
+*.pid.lock
+.tmp_*
+
+# IDE / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Generated project artifacts
+artifacts/prompt_snapshots/
+
+# Optional: uncomment these for a code-only/public repo
+# data/papers/
+# artifacts/reports/
