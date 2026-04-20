@@ -8,6 +8,7 @@ from proof_agent.app_config import (
     REQUEST_TIMEOUT_SECONDS,
     _active_api_key,
 )
+from proof_agent.logging_setup import configure_logging
 from proof_agent.paths import PRIMARY_PAPER_PATH
 from proof_agent.reporting import _build_report_filename
 from proof_agent.research_system import AutonomousResearchSystem
@@ -36,6 +37,9 @@ The desired outcome is not repeated discussion around 1.98, but instead:
 
 
 def main():
+    safe_model = "".join(c if c.isalnum() or c in "-_." else "_" for c in MODEL_NAME) or "unknown_model"
+    log_path = configure_logging(tag=f"run_{safe_model}")
+    print(f"📝 日志文件: {log_path}", flush=True)
     print(
         f"🚀 启动配置: provider={LLM_PROVIDER}, model={MODEL_NAME}, "
         f"stream={1 if PREFER_STREAMING else 0}, timeout={REQUEST_TIMEOUT_SECONDS}s, "
@@ -49,6 +53,10 @@ def main():
             print("请先设置 GEMINI_API_KEY（或 GOOGLE_API_KEY，环境变量或 .env 文件）。")
         elif LLM_PROVIDER == "ai_hub_mixed":
             print("请先设置 AI_HUB_MIXED_MODEL_API_KEY（环境变量或 .env 文件）。")
+        elif LLM_PROVIDER == "openai":
+            print("请先设置 OPENAI_API_KEY（环境变量或 .env 文件）。")
+        elif LLM_PROVIDER == "openrouter":
+            print("请先设置 OPENROUTER_API_KEY（环境变量或 .env 文件）。")
         else:
             print("请先设置 SILICONFLOW_API_KEY（环境变量或 .env 文件）。")
         return 1

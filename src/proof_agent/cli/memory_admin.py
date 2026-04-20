@@ -25,14 +25,22 @@ def candidate_from_snapshot_row(row: sqlite3.Row) -> CandidateRecord:
     return CandidateRecord.from_dict(json.loads(str(row["payload_json"])))
 
 
-def fetch_latest_candidates(conn: sqlite3.Connection, status: str = "", limit: int = 0):
+def fetch_latest_candidates(
+    conn: sqlite3.Connection,
+    status: str = "",
+    limit: int = 0,
+    namespace: str | None = None,
+):
     clauses = []
-    params = []
+    params: list = []
     sql = [
-        "SELECT cs.snapshot_id, cs.saved_at, cs.status, cs.derived_from, cs.form, cs.payload_json",
+        "SELECT cs.snapshot_id, cs.saved_at, cs.status, cs.derived_from, cs.form, cs.payload_json, cs.memory_namespace",
         "FROM candidate_latest cl",
         "JOIN candidate_snapshots cs ON cs.snapshot_id = cl.snapshot_id",
     ]
+    if namespace is not None:
+        clauses.append("cl.memory_namespace = ?")
+        params.append(namespace)
     if status:
         clauses.append("LOWER(cs.status) = ?")
         params.append(status.strip().lower())
@@ -47,34 +55,73 @@ def fetch_latest_candidates(conn: sqlite3.Connection, status: str = "", limit: i
 
 def fetch_snapshot(conn: sqlite3.Connection, snapshot_id: int):
     return conn.execute(
-        "SELECT snapshot_id, saved_at, status, derived_from, form, payload_json "
+        "SELECT snapshot_id, saved_at, status, derived_from, form, payload_json, memory_namespace "
         "FROM candidate_snapshots WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
 
 
-def fetch_latest_snapshot_for_candidate(conn: sqlite3.Connection, candidate_id: str):
+def fetch_latest_snapshot_for_candidate(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    namespace: str | None = None,
+):
+    params: list = [candidate_id]
+    ns_clause = ""
+    if namespace is not None:
+        ns_clause = "AND cl.memory_namespace = ? "
+        params.append(namespace)
     return conn.execute(
-        """
-        SELECT cs.snapshot_id, cs.saved_at, cs.status, cs.derived_from, cs.form, cs.payload_json
+        f"""
+        SELECT cs.snapshot_id, cs.saved_at, cs.status, cs.derived_from, cs.form, cs.payload_json, cs.memory_namespace
         FROM candidate_latest cl
         JOIN candidate_snapshots cs ON cs.snapshot_id = cl.snapshot_id
-        WHERE cl.candidate_id = ?
+        WHERE cl.candidate_id = ? {ns_clause}
+        ORDER BY cs.snapshot_id DESC
+        LIMIT 1
         """,
-        (candidate_id,),
+        params,
     ).fetchone()
 
 
-def fetch_all_snapshots_for_candidate(conn: sqlite3.Connection, candidate_id: str):
+def fetch_all_snapshots_for_candidate(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    namespace: str | None = None,
+):
+    params: list = [candidate_id]
+    ns_clause = ""
+    if namespace is not None:
+        ns_clause = "AND memory_namespace = ? "
+        params.append(namespace)
     return conn.execute(
-        """
-        SELECT snapshot_id, saved_at, status, derived_from, form, payload_json
+        f"""
+        SELECT snapshot_id, saved_at, status, derived_from, form, payload_json, memory_namespace
         FROM candidate_snapshots
-        WHERE candidate_id = ?
+        WHERE candidate_id = ? {ns_clause}
         ORDER BY snapshot_id DESC
         """,
-        (candidate_id,),
+        params,
     ).fetchall()
+
+
+def list_namespaces(conn: sqlite3.Connection):
+    """Return [(namespace, candidate_count, latest_snapshot_id, latest_saved_at), ...]
+    sorted by latest_snapshot_id desc.
+    """
+    rows = conn.execute(
+        """
+        SELECT cl.memory_namespace AS ns,
+               COUNT(*) AS cnt,
+               MAX(cs.snapshot_id) AS latest_snap,
+               MAX(cs.saved_at) AS latest_ts
+        FROM candidate_latest cl
+        JOIN candidate_snapshots cs ON cs.snapshot_id = cl.snapshot_id
+        GROUP BY cl.memory_namespace
+        ORDER BY latest_snap DESC
+        """
+    ).fetchall()
+    return [(str(r["ns"] or ""), int(r["cnt"] or 0), int(r["latest_snap"] or 0), str(r["latest_ts"] or "")) for r in rows]
 
 
 def format_property_snapshot(record: CandidateRecord) -> str:
@@ -142,54 +189,91 @@ def require_confirm(args):
     raise SystemExit("Refusing to delete without --yes.")
 
 
-def delete_candidate(conn: sqlite3.Connection, candidate_id: str):
-    row = conn.execute(
-        "SELECT COUNT(*) AS count FROM candidate_snapshots WHERE candidate_id = ?",
-        (candidate_id,),
-    ).fetchone()
-    count = int(row["count"] or 0)
+def delete_candidate(conn: sqlite3.Connection, candidate_id: str, namespace: str | None = None):
+    clauses = ["candidate_id = ?"]
+    params: list = [candidate_id]
+    if namespace is not None:
+        clauses.append("memory_namespace = ?")
+        params.append(namespace)
+    rows = conn.execute(
+        "SELECT snapshot_id FROM candidate_snapshots WHERE " + " AND ".join(clauses),
+        params,
+    ).fetchall()
+    snapshot_ids = [int(row["snapshot_id"]) for row in rows]
+    count = len(snapshot_ids)
     if count <= 0:
         print(f"Candidate not found: {candidate_id}", file=sys.stderr)
         raise SystemExit(1)
-    conn.execute("DELETE FROM tool_request_states WHERE candidate_id = ?", (candidate_id,))
-    conn.execute("DELETE FROM artifacts WHERE candidate_id = ?", (candidate_id,))
-    conn.execute("DELETE FROM proposition_states WHERE candidate_id = ?", (candidate_id,))
-    conn.execute("DELETE FROM property_states WHERE candidate_id = ?", (candidate_id,))
-    conn.execute("DELETE FROM candidate_latest WHERE candidate_id = ?", (candidate_id,))
-    conn.execute("DELETE FROM candidate_snapshots WHERE candidate_id = ?", (candidate_id,))
+    for snapshot_id in snapshot_ids:
+        conn.execute(
+            "DELETE FROM tool_request_states WHERE snapshot_id = ? AND candidate_id = ?",
+            (snapshot_id, candidate_id),
+        )
+        conn.execute(
+            "DELETE FROM artifacts WHERE snapshot_id = ? AND candidate_id = ?",
+            (snapshot_id, candidate_id),
+        )
+        conn.execute(
+            "DELETE FROM proposition_states WHERE snapshot_id = ? AND candidate_id = ?",
+            (snapshot_id, candidate_id),
+        )
+        conn.execute(
+            "DELETE FROM property_states WHERE snapshot_id = ? AND candidate_id = ?",
+            (snapshot_id, candidate_id),
+        )
+    if namespace is None:
+        conn.execute("DELETE FROM candidate_latest WHERE candidate_id = ?", (candidate_id,))
+    else:
+        conn.execute(
+            "DELETE FROM candidate_latest WHERE candidate_id = ? AND memory_namespace = ?",
+            (candidate_id, namespace),
+        )
+    for snapshot_id in snapshot_ids:
+        conn.execute(
+            "DELETE FROM candidate_snapshots WHERE snapshot_id = ? AND candidate_id = ?",
+            (snapshot_id, candidate_id),
+        )
     conn.commit()
-    print(f"Deleted candidate {candidate_id} and {count} snapshot(s).")
+    suffix = f" in namespace {namespace}" if namespace is not None else ""
+    print(f"Deleted candidate {candidate_id}{suffix} and {count} snapshot(s).")
 
 
-def delete_candidates_by_status(conn: sqlite3.Connection, status: str):
+def delete_candidates_by_status(conn: sqlite3.Connection, status: str, namespace: str | None = None):
     normalized = str(status or "").strip().lower()
     if not normalized:
         raise SystemExit("Missing status.")
-    rows = fetch_latest_candidates(conn, status=normalized, limit=0)
-    candidate_ids = []
+    rows = fetch_latest_candidates(conn, status=normalized, limit=0, namespace=namespace)
+    scoped_candidates = []
+    seen = set()
     for row in rows:
         record = candidate_from_snapshot_row(row)
         if record.candidate_id:
-            candidate_ids.append(record.candidate_id)
-    if not candidate_ids:
+            row_namespace = str(row["memory_namespace"] or "") if "memory_namespace" in row.keys() else None
+            key = (row_namespace, record.candidate_id) if namespace is not None else record.candidate_id
+            if key in seen:
+                continue
+            seen.add(key)
+            scoped_candidates.append((record.candidate_id, row_namespace if namespace is not None else None))
+    if not scoped_candidates:
         print(f"No candidates found with status={normalized}.")
         return []
     deleted = []
-    for candidate_id in candidate_ids:
-        delete_candidate(conn, candidate_id)
+    for candidate_id, row_namespace in scoped_candidates:
+        delete_candidate(conn, candidate_id, namespace=row_namespace)
         deleted.append(candidate_id)
     return deleted
 
 
 def delete_snapshot(conn: sqlite3.Connection, snapshot_id: int):
     row = conn.execute(
-        "SELECT snapshot_id, candidate_id FROM candidate_snapshots WHERE snapshot_id = ?",
+        "SELECT snapshot_id, candidate_id, memory_namespace FROM candidate_snapshots WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
     if not row:
         print(f"Snapshot not found: {snapshot_id}", file=sys.stderr)
         raise SystemExit(1)
     candidate_id = str(row["candidate_id"])
+    namespace = str(row["memory_namespace"] or "")
     conn.execute(
         "DELETE FROM tool_request_states WHERE snapshot_id = ? AND candidate_id = ?",
         (snapshot_id, candidate_id),
@@ -207,13 +291,14 @@ def delete_snapshot(conn: sqlite3.Connection, snapshot_id: int):
         (snapshot_id, candidate_id),
     )
     latest = conn.execute(
-        "SELECT snapshot_id FROM candidate_latest WHERE candidate_id = ?",
-        (candidate_id,),
+        "SELECT snapshot_id FROM candidate_latest WHERE candidate_id = ? AND memory_namespace = ?",
+        (candidate_id, namespace),
     ).fetchone()
     replacement = conn.execute(
         "SELECT snapshot_id, status, derived_from, form FROM candidate_snapshots "
-        "WHERE candidate_id = ? AND snapshot_id != ? ORDER BY snapshot_id DESC LIMIT 1",
-        (candidate_id, snapshot_id),
+        "WHERE candidate_id = ? AND memory_namespace = ? AND snapshot_id != ? "
+        "ORDER BY snapshot_id DESC LIMIT 1",
+        (candidate_id, namespace, snapshot_id),
     ).fetchone()
     if latest and int(latest["snapshot_id"]) == int(snapshot_id):
         if replacement:
@@ -221,7 +306,7 @@ def delete_snapshot(conn: sqlite3.Connection, snapshot_id: int):
                 """
                 UPDATE candidate_latest
                 SET snapshot_id = ?, status = ?, derived_from = ?, form = ?
-                WHERE candidate_id = ?
+                WHERE candidate_id = ? AND memory_namespace = ?
                 """,
                 (
                     int(replacement["snapshot_id"]),
@@ -229,32 +314,17 @@ def delete_snapshot(conn: sqlite3.Connection, snapshot_id: int):
                     str(replacement["derived_from"] or ""),
                     str(replacement["form"] or ""),
                     candidate_id,
+                    namespace,
                 ),
             )
         else:
-            conn.execute("DELETE FROM candidate_latest WHERE candidate_id = ?", (candidate_id,))
+            conn.execute(
+                "DELETE FROM candidate_latest WHERE candidate_id = ? AND memory_namespace = ?",
+                (candidate_id, namespace),
+            )
     conn.execute("DELETE FROM candidate_snapshots WHERE snapshot_id = ?", (snapshot_id,))
-    if latest and int(latest["snapshot_id"]) != int(snapshot_id) and replacement:
-        conn.execute(
-            """
-            INSERT INTO candidate_latest (candidate_id, snapshot_id, status, derived_from, form)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(candidate_id) DO UPDATE SET
-                snapshot_id=excluded.snapshot_id,
-                status=excluded.status,
-                derived_from=excluded.derived_from,
-                form=excluded.form
-            """,
-            (
-                candidate_id,
-                int(replacement["snapshot_id"]),
-                str(replacement["status"] or ""),
-                str(replacement["derived_from"] or ""),
-                str(replacement["form"] or ""),
-            ),
-        )
     conn.commit()
-    print(f"Deleted snapshot {snapshot_id} for candidate {candidate_id}.")
+    print(f"Deleted snapshot {snapshot_id} for candidate {candidate_id} in namespace {namespace}.")
 
 
 def print_candidate_history(conn: sqlite3.Connection, candidate_id: str):

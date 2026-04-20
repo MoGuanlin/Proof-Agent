@@ -59,5 +59,5 @@ nohup*.out
 artifacts/prompt_snapshots/
 
 # Optional: uncomment these for a code-only/public repo
-# data/papers/
-# artifacts/reports/
+data/papers/
+artifacts/reports/

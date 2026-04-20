@@ -17,6 +17,7 @@ from .agents import (
     proof_planner,
     proof_writer,
 )
+from . import app_config as cfg
 from .app_config import (
     CANDIDATE_MAX_COUNT,
     CANDIDATE_MEMORY_FILE,
@@ -49,7 +50,7 @@ from .app_config import (
     PROPOSITION_REVIEW_MAX_ROUNDS,
     REVIEWER_ROLE_OVERRIDES,
 )
-from .candidate_memory import CandidateRecord, MemoryManager
+from .candidate_memory import CandidateRecord, MemoryManager, build_memory_namespace
 from .literature_rag import LiteratureRAG
 from .paths import (
     LEGACY_PROMPT_SNAPSHOT_FILE,
@@ -325,6 +326,8 @@ class AutonomousResearchSystem:
         self.candidate_reviewers = [correctness_checker, logic_rev, global_rev]
         self.architecture_mode = "candidate"
         self.memory = MemoryManager(CANDIDATE_MEMORY_FILE)
+        self.prompt_snapshot_hash = ""
+        self.memory_namespace = ""
         self.property_order = ["N1", "N2", "N3", "D4", "Q5", "Q6"]
         self.literature_rag = None
         self.literature_rag_warning = ""
@@ -596,7 +599,7 @@ class AutonomousResearchSystem:
         return parsed
 
     @staticmethod
-    def _truncate_for_prompt(text, max_chars=24000):
+    def _truncate_for_prompt(text, max_chars=cfg.PROMPT_DEFAULT_MAX_CHARS):
         text = str(text or "").strip()
         if DISABLE_TEXT_TRUNCATION:
             return text
@@ -666,7 +669,8 @@ class AutonomousResearchSystem:
 
         if not picked:
             return head
-        return f"{head}\n\n[Key Excerpts]\n{'\n'.join(picked)}"[:max_chars]
+        excerpts = "\n".join(picked)
+        return f"{head}\n\n[Key Excerpts]\n{excerpts}"[:max_chars]
 
     @staticmethod
     def _read_markdown_file(path):
@@ -788,10 +792,25 @@ class AutonomousResearchSystem:
                 agent.role = f"You are {agent.name}. Produce rigorous, actionable output for the current mathematical task."
             configured_prompts[agent.name] = agent.role
 
+        prompt_hash_payload = json.dumps(configured_prompts, ensure_ascii=False, sort_keys=True)
+        self.prompt_snapshot_hash = hashlib.sha1(prompt_hash_payload.encode("utf-8")).hexdigest()[:16]
+        self.memory_namespace = build_memory_namespace(
+            self.architecture_mode,
+            self.prompt_snapshot_hash,
+        )
+        self.memory.set_namespace(
+            architecture_mode=self.architecture_mode,
+            prompt_snapshot_hash=self.prompt_snapshot_hash,
+            namespace=self.memory_namespace,
+        )
+
         snapshot_payload = {
             "artifact_type": "runtime_prompt_snapshot",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "editable_source": "proof_agent.app_config.REVIEWER_ROLE_OVERRIDES / built-in agent roles",
+            "architecture_mode": self.architecture_mode,
+            "prompt_snapshot_hash": self.prompt_snapshot_hash,
+            "memory_namespace": self.memory_namespace,
             "agent_roles": configured_prompts,
         }
         with open(PROMPT_SNAPSHOT_FILE, "w", encoding="utf-8") as handle:
@@ -808,15 +827,27 @@ class AutonomousResearchSystem:
                 indent=2,
             )
         print(f"📝 已保存静态角色配置: {PROMPT_SNAPSHOT_FILE}")
+        print(
+            f"🗂️ Memory namespace: {self.memory_namespace} "
+            f"(architecture_mode={self.architecture_mode}, prompt_snapshot_hash={self.prompt_snapshot_hash})"
+        )
         print("✅ 专家团队角色加载完成。")
 
     def _generate_reviewer_directive(self, reviewer, context, draft, stage_label="subtask review"):
         reviewer_name = reviewer.name if hasattr(reviewer, "name") else "Reviewer"
-        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=3200) or "[missing]"
-        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=2400) or "[missing]"
-        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=5200) or "[missing]"
-        verification_needs = self._truncate_for_prompt(self._extract_markdown_section(draft, "Verification Needs"), max_chars=2400) or "[missing]"
-        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=2400) or "[missing]"
+        assumptions = self._truncate_for_prompt(self._extract_markdown_section(draft, "Assumptions"), max_chars=cfg.REVIEWER_ASSUMPTIONS_MAX_CHARS) or "[missing]"
+        claim = self._truncate_for_prompt(self._extract_markdown_section(draft, "Claim"), max_chars=cfg.REVIEWER_CLAIM_MAX_CHARS) or "[missing]"
+        derivation = self._truncate_for_prompt(self._extract_markdown_section(draft, "Derivation"), max_chars=cfg.REVIEWER_DERIVATION_MAX_CHARS) or "[missing]"
+        verification_needs = self._truncate_for_prompt(self._extract_markdown_section(draft, "Verification Needs"), max_chars=cfg.REVIEWER_VERIFICATION_NEEDS_MAX_CHARS) or "[missing]"
+        conclusion = self._truncate_for_prompt(self._extract_markdown_section(draft, "Conclusion"), max_chars=cfg.REVIEWER_CONCLUSION_MAX_CHARS) or "[missing]"
+        q5_hard_gate = "q5" in str(context or "").lower()
+        verification_contract = (
+            "8) If `Verification Needs` is not exactly `None`, the proposition is not closed yet. "
+            "Treat unresolved verification needs as a fatal issue and return [REJECT] with a precise repair target.\n"
+            if q5_hard_gate
+            else "8) For non-Q5 propositions, treat `Verification Needs` as an advisory signal rather than an automatic rejection trigger. "
+            "Do not reject solely because it is not `None`; reject only if it exposes a genuine mathematical gap that makes the current Claim unsupported.\n"
+        )
         q6_contract = ""
         if "q6" in str(context or "").lower():
             q6_contract = (
@@ -827,7 +858,7 @@ class AutonomousResearchSystem:
             f"Stage: {stage_label}\n"
             f"Reviewer: {reviewer_name}\n"
             f"Current Task Contract:\n"
-            f"- Task context: {self._truncate_for_prompt(context, max_chars=2400)}\n"
+            f"- Task context: {self._truncate_for_prompt(context, max_chars=cfg.REVIEWER_CONTEXT_MAX_CHARS)}\n"
             f"- Current assumptions: {assumptions}\n"
             f"- Current claim: {claim}\n"
             f"- Current verification needs: {verification_needs}\n"
@@ -840,7 +871,7 @@ class AutonomousResearchSystem:
             "5) If the current task is only a local property, parameterization, derivative formula, or intermediate inequality, do not require it to establish the final global theorem on its own.\n"
             "6) If the draft claims that the final global theorem, final upper bound, or full proof closure is complete even though the context does not require that strength, treat this as a fatal overclaim.\n"
             "7) If the Derivation explicitly adopts replacement definitions or a reparameterization and then uses them consistently, do not reject merely because they differ from the original paper's conventions.\n"
-            "8) If `Verification Needs` is not exactly `None`, the proposition is not closed yet. Treat unresolved verification needs as a fatal issue and return [REJECT] with a precise repair target.\n"
+            f"{verification_contract}"
             f"{q6_contract}"
             f"Derivation excerpt:\n{derivation}\n"
         )
@@ -866,7 +897,7 @@ class AutonomousResearchSystem:
             property_lines.append(line)
         proposition_lines = []
         for prop in self.property_order:
-            snapshot = candidate.proposition_snapshot(prop, max_items=8)
+            snapshot = candidate.proposition_snapshot(prop, max_items=cfg.TERMINAL_REPORT_PROPOSITION_SNAPSHOT_MAX_ITEMS)
             if snapshot:
                 proposition_lines.append(f"- {prop}: {snapshot}")
         decision = candidate.terminal_decision or {}
@@ -898,15 +929,15 @@ class AutonomousResearchSystem:
             ),
             "N2": (
                 "N2 contract: show the monotonicity comparison after removing the terminal disk, including the objects on both sides, the parameters involved, and where each difference term comes from. "
-                "Until Verification Needs is exactly None, N2 is not complete."
+                "If some side condition is left informal, record it explicitly in Verification Needs so the reviewer can judge whether it is fatal or merely advisory."
             ),
             "N3": (
                 "N3 contract: state the subadditivity inequality (or the exact replacement inequality) after an internal split, and explain how the terms on both sides of the split are recombined. "
-                "Until Verification Needs is exactly None, N3 is not complete."
+                "If any local side check remains informal, record it explicitly in Verification Needs instead of silently omitting it."
             ),
             "D4": (
                 "D4 contract: explain how dependence on the terminal point v is controlled. In particular, arguments based on convexity, cancellation, or irrelevance must not skip steps. "
-                "Until Verification Needs is exactly None, D4 is not complete."
+                "If some endpoint or monotonicity sub-check is left as an advisory follow-up, list it explicitly in Verification Needs."
             ),
             "Q5": (
                 "Q5 contract: separate the analytically proved part from the part that still requires a numeric certificate. Until the numeric certificate is verified, the property is not complete."
@@ -917,7 +948,7 @@ class AutonomousResearchSystem:
                 "If you do not write an explicit constant chain showing how the new constants enter the lower-bound ratio, the Lemma-3-type estimate, and the rho/lambda relation, "
                 "you may not claim that the bound can be pushed to 1.98, support rho < 1.98, or allow a smaller global upper bound. In that case, the Conclusion may only state a candidate direction or a local constraint. "
                 "Q6 is reviewed logically by the large-model reviewers by default and does not require a tool-verification protocol. "
-                "Until Verification Needs is exactly None, Q6 is not complete."
+                "If any residual side check remains, list it explicitly in Verification Needs so the reviewer can decide whether the draft still supports the claimed local conclusion."
             ),
         }
         return guidance.get(property_name, "")
@@ -976,7 +1007,13 @@ class AutonomousResearchSystem:
     def _verification_needs_is_none(section_text):
         return str(section_text or "").strip().lower() == "none"
 
+    @staticmethod
+    def _verification_needs_hard_gate(property_name):
+        return str(property_name or "").strip().upper() == "Q5"
+
     def _proposition_closure_reason(self, property_name, proposition_id, draft):
+        if not self._verification_needs_hard_gate(property_name):
+            return ""
         verification_needs = self._extract_markdown_section(draft, "Verification Needs")
         if self._verification_needs_closed(verification_needs):
             return ""
@@ -1193,17 +1230,17 @@ class AutonomousResearchSystem:
                 f"{candidate.pruned_reason}\npost terminal decision next direction"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=9000,
-            summary_max_chars=4000,
+            snippet_max_chars=cfg.POST_TERMINAL_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.POST_TERMINAL_LITERATURE_SUMMARY_MAX_CHARS,
         )
         terminal_report = candidate.artifacts.get("terminal_report") or self._build_terminal_candidate_report(candidate)
         recent_summary = self.memory.terminal_report_summary(
             max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
-            max_chars=7000,
+            max_chars=cfg.POST_TERMINAL_TERMINAL_SUMMARY_MAX_CHARS,
         )
         prompt = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Latest terminal candidate report:\n{terminal_report}\n\n"
             f"Recent terminal-candidate summary:\n{recent_summary or '[none]'}\n\n"
             f"Current stats: passed={len(passed_candidates)}, pruned={len(pruned_candidates)}, remaining_budget={remaining_budget}\n\n"
@@ -1237,20 +1274,20 @@ class AutonomousResearchSystem:
         return decision
 
     def _build_candidate_direction(self, goal, literature_context, terminal_report="", is_initial=False):
-        memory_summary = self.memory.summarize_for_prompt(
+        memory_summary = self.memory.search_memory_packet(
             max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-            max_chars=12000,
+            max_chars=cfg.DIRECTION_MEMORY_MAX_CHARS,
         )
         terminal_reports = self.memory.terminal_report_summary(
             max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS,
-            max_chars=7000,
+            max_chars=cfg.DIRECTION_TERMINAL_SUMMARY_MAX_CHARS,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{terminal_report}\ncandidate design direction\nN1 N2 N3 D4 Q5 Q6",
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=12000,
-            summary_max_chars=5000,
+            snippet_max_chars=cfg.DIRECTION_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.DIRECTION_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt_header = (
             "Give the initial exploration direction."
@@ -1264,7 +1301,7 @@ class AutonomousResearchSystem:
         )
         prompt = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"{terminal_block}"
             f"Recent terminal-candidate summary:\n{terminal_reports or '[no terminal candidates yet]'}\n\n"
             f"Historical candidate summary:\n{memory_summary or '[no historical candidates yet]'}\n\n"
@@ -1283,20 +1320,20 @@ class AutonomousResearchSystem:
         ).strip()
 
     def _design_candidate(self, goal, literature_context, direction, candidate_index):
-        memory_summary = self.memory.summarize_for_prompt(
+        memory_summary = self.memory.search_memory_packet(
             max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-            max_chars=12000,
+            max_chars=cfg.DESIGN_MEMORY_MAX_CHARS,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
             query=f"{goal}\n{direction}\nnew potential-function candidate\n{' '.join(self.property_order)}",
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=12000,
-            summary_max_chars=5000,
+            snippet_max_chars=cfg.DESIGN_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.DESIGN_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt = (
             f"Research goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Current direction:\n{direction}\n\n"
             f"Historical candidate summary:\n{memory_summary or '[no historical candidates yet]'}\n\n"
             "Propose one new potential-function candidate and output a JSON object with the fields:\n"
@@ -1362,17 +1399,17 @@ class AutonomousResearchSystem:
                 "proof plan reusable props needs redo priority N2 N3 D4 Q5 Q6"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=5000,
-            summary_max_chars=2200,
+            snippet_max_chars=cfg.CANDIDATE_PLAN_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.CANDIDATE_PLAN_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt = (
             f"Research goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Candidate ID: {candidate.candidate_id}\n"
             f"Candidate form: {candidate.form}\n"
             f"Design intuition: {candidate.intuition}\n"
             f"Source direction: {candidate.source_direction}\n\n"
-            f"Candidate/property memory:\n{planning_memory or '[none]'}\n\n"
+            f"Search + property learning memory:\n{planning_memory or '[none]'}\n\n"
             "Output a JSON object with the fields:\n"
             "reusable_props, needs_redo, priority, risk_notes, estimated_c, obvious_failure。\n"
             "obvious_failure must be an object with the fields status, property, reason; if there is no obvious failure then status=false.\n"
@@ -1415,27 +1452,19 @@ class AutonomousResearchSystem:
             candidate.append_log("prune", "planner pruned candidate", property=fail_property, reason=reason)
         return payload
 
-    def _candidate_memory_context(self, candidate):
-        similar = self.memory.find_similar_failures(
+    def _candidate_failure_context(self, candidate, property_name="", max_chars=cfg.CANDIDATE_FAILURE_CONTEXT_MAX_CHARS):
+        prop = str(property_name or "").strip()
+        summary = self.memory.similar_failure_summary(
             candidate.form,
+            property_name=prop or None,
             limit=MEMORY_SIMILAR_FAILURE_LIMIT,
+            max_chars=max_chars,
         )
-        if not similar:
-            return self.memory.summarize_for_prompt(
-                max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-                max_chars=5000,
-            )
-        lines = [
-            self.memory.summarize_for_prompt(
-                max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-                max_chars=3000,
-            )
-        ]
-        for item in similar:
-            lines.append(
-                f"- Similar failure {item.candidate_id}: form={item.form}; pruned_reason={item.pruned_reason or '[missing]'}"
-            )
-        return "\n".join(line for line in lines if line).strip()
+        if not summary:
+            return ""
+        if prop:
+            return f"[Similar failures for {prop}]\n{summary}"
+        return f"[Similar failures for the current form]\n{summary}"
 
     @staticmethod
     def _remaining_candidate_properties(candidate, property_order):
@@ -1449,35 +1478,39 @@ class AutonomousResearchSystem:
 
     def _candidate_planning_memory(self, candidate):
         parts = [
-            self.memory.summarize_for_prompt(
+            self.memory.search_memory_packet(
                 max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES,
-                max_chars=2500,
+                max_chars=cfg.CANDIDATE_PLANNING_SEARCH_MEMORY_MAX_CHARS,
             )
         ]
         for prop in self.property_order:
-            packet = self.memory.property_memory_packet(
+            packet = self.memory.property_learning_packet(
                 prop,
                 form_text=candidate.form,
                 max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-                max_chars=900,
+                max_chars=cfg.CANDIDATE_PLANNING_PROPERTY_MAX_CHARS,
             )
             if packet:
-                parts.append(f"[{prop} proposition memory]\n{packet}")
-        return self._truncate_for_prompt("\n\n".join(part for part in parts if part), max_chars=6500)
+                parts.append(f"[{prop} learning]\n{packet}")
+        return self._truncate_for_prompt("\n\n".join(part for part in parts if part), max_chars=cfg.CANDIDATE_PLANNING_TOTAL_MAX_CHARS)
 
     def _property_memory_context(self, candidate, property_name):
-        base_context = self._candidate_memory_context(candidate)
-        property_packet = self.memory.property_memory_packet(
+        failure_context = self._candidate_failure_context(
+            candidate,
+            property_name=property_name,
+            max_chars=cfg.PROPERTY_FAILURE_CONTEXT_MAX_CHARS,
+        )
+        property_packet = self.memory.property_learning_packet(
             property_name,
             form_text=candidate.form,
             max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-            max_chars=2500,
+            max_chars=cfg.PROPERTY_LEARNING_CONTEXT_MAX_CHARS,
         )
         if not property_packet:
-            return base_context
+            return failure_context
         return "\n\n".join(
             part
-            for part in [base_context, f"[{property_name} proposition-level historical knowledge]\n{property_packet}"]
+            for part in [failure_context, f"[{property_name} property learning]\n{property_packet}"]
             if part
         ).strip()
 
@@ -1486,7 +1519,7 @@ class AutonomousResearchSystem:
         candidate,
         property_name,
         max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=2200,
+        max_chars=cfg.MEMORY_PROPOSITION_REUSE_PACKET_MAX_CHARS,
     ):
         return self.memory.proposition_reuse_packet(
             property_name,
@@ -1500,7 +1533,7 @@ class AutonomousResearchSystem:
         candidate,
         property_name,
         max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=2200,
+        max_chars=cfg.MEMORY_TOOL_REQUEST_REUSE_PACKET_MAX_CHARS,
     ):
         return self.memory.tool_request_reuse_packet(
             property_name,
@@ -1595,11 +1628,11 @@ class AutonomousResearchSystem:
             property_scope = remaining
         property_packets = []
         for prop in property_scope:
-            packet = self.memory.property_memory_packet(
+            packet = self.memory.property_learning_packet(
                 prop,
                 form_text=candidate.form,
                 max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-                max_chars=1800,
+                max_chars=cfg.LOCAL_PROPERTY_PACKET_MAX_CHARS,
             )
             if packet:
                 property_packets.append(f"[{prop}]\n{packet}")
@@ -1611,12 +1644,12 @@ class AutonomousResearchSystem:
                 f"last_property={last_property}\nnext local proof step"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=8000,
-            summary_max_chars=3500,
+            snippet_max_chars=cfg.LOCAL_PLANNER_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.LOCAL_PLANNER_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Candidate ID: {candidate.candidate_id}\n"
             f"Candidate form: {candidate.form}\n"
             f"Design intuition: {candidate.intuition or '[missing]'}\n"
@@ -1624,7 +1657,7 @@ class AutonomousResearchSystem:
             f"Current property snapshot: {self._candidate_property_snapshot(candidate)}\n"
             f"Property just completed: {last_property}\n"
             f"Remaining unpassed properties: {', '.join(remaining) or '[none]'}\n\n"
-            f"Relevant property memory:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=12000) or '[none]'}\n\n"
+            f"Relevant property learning memory:\n{self._truncate_for_prompt(chr(10).join(property_packets), max_chars=cfg.LOCAL_PROPERTY_MEMORY_TOTAL_MAX_CHARS) or '[none]'}\n\n"
             "You are now the local proof planner inside the exploration loop. "
             "Based on the candidate's local progress, decide what should happen next within this candidate.\n"
             "Output a JSON object with the fields: action, next_property, updated_priority, rationale, risk_update.\n"
@@ -1672,6 +1705,64 @@ class AutonomousResearchSystem:
     def _normalize_tool_request_id(value, fallback):
         cleaned = re.sub(r"[^A-Za-z0-9_:-]+", "_", str(value or "").strip())
         return cleaned or fallback
+
+    @staticmethod
+    def _required_numeric_1d_spec_fields():
+        return (
+            "status",
+            "mode",
+            "strategy",
+            "variable",
+            "domain",
+            "inequalities",
+            "grid_points",
+            "lipschitz",
+            "tolerance",
+            "max_iterations",
+            "min_width",
+            "notes",
+        )
+
+    def _forced_numeric_1d_request_issue(self, request):
+        tool_name = str((request or {}).get("tool_name", "")).strip().lower() or "verification"
+        if tool_name != "verification":
+            return f"unsupported tool_name={tool_name or '[missing]'}"
+        spec = (request or {}).get("spec") or {}
+        if not isinstance(spec, dict):
+            return "spec is not a JSON object"
+        mode = str(spec.get("mode", "")).strip().lower()
+        if mode != "numeric_1d":
+            return f"spec.mode must be numeric_1d, got {mode or '[missing]'}"
+        missing = [
+            field
+            for field in self._required_numeric_1d_spec_fields()
+            if field not in spec
+        ]
+        if missing:
+            return "missing required numeric_1d fields: " + ", ".join(missing)
+        return ""
+
+    def _filter_executable_numeric_1d_requests(self, requests):
+        executable = []
+        invalid = []
+        for index, item in enumerate(requests or [], start=1):
+            fallback_id = f"forced_numeric_1d_{index}"
+            request_id = self._normalize_tool_request_id(
+                (item or {}).get("request_id", ""),
+                fallback=fallback_id,
+            )
+            issue = self._forced_numeric_1d_request_issue(item)
+            if issue:
+                invalid.append({"request_id": request_id, "reason": issue})
+                continue
+            executable.append(item)
+        return executable, invalid
+
+    def _draft_verification_needs(self, draft):
+        return self._truncate_for_prompt(
+            self._extract_markdown_section(draft, "Verification Needs"),
+            max_chars=cfg.TOOL_REQUEST_VERIFICATION_NEEDS_MAX_CHARS,
+        ) or "[not explicitly stated]"
 
     def _default_property_propositions(self, property_name):
         return [
@@ -1734,7 +1825,7 @@ class AutonomousResearchSystem:
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=4200,
+            max_chars=cfg.PROPOSITION_PLANNER_REUSE_MAX_CHARS,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
@@ -1743,19 +1834,19 @@ class AutonomousResearchSystem:
                 f"{candidate.risk_notes}\nproposition decomposition"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=12000,
-            summary_max_chars=5000,
+            snippet_max_chars=cfg.PROPOSITION_PLANNER_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.PROPOSITION_PLANNER_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt = (
             f"Research goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Candidate ID: {candidate.candidate_id}\n"
             f"Candidate form: {candidate.form}\n"
             f"Current property: {property_name}\n"
             f"Design intuition: {candidate.intuition}\n"
             f"Current property contract:\n{property_guidance or '[none]'}\n\n"
-            f"Candidate/property memory:\n{memory_context or '[none]'}\n\n"
-            f"Reusable historical proposition templates:\n{reuse_context or '[none]'}\n\n"
+            f"Property learning memory:\n{memory_context or '[none]'}\n\n"
+            f"Reusable proposition exemplars:\n{reuse_context or '[none]'}\n\n"
             "Decompose the current property into 1-4 propositions that can be reviewed independently, and output a JSON array.\n"
             "Each element must contain: id, title, claim, dependencies, verification_focus, requires_tool, tool_plan.\n"
             "Rules:\n"
@@ -1839,21 +1930,21 @@ class AutonomousResearchSystem:
         property_context,
         property_guidance,
         retry_feedback="",
+        force_numeric_1d=False,
     ):
+        if not self._parse_bool_flag((proposition or {}).get("requires_tool")) or property_name != "Q5":
+            return []
         proposition_id = str(proposition.get("id", "")).strip() or f"{property_name.lower()}_prop"
         proposition_title = str(proposition.get("title", "")).strip() or proposition_id
         proposition_claim = str(proposition.get("claim", "")).strip() or "[missing]"
         tool_plan = proposition.get("tool_plan") or {}
-        verification_needs = self._truncate_for_prompt(
-            self._extract_markdown_section(draft, "Verification Needs"),
-            max_chars=2400,
-        ) or "[not explicitly stated]"
+        verification_needs = self._draft_verification_needs(draft)
         verification_closed = self._verification_needs_is_none(verification_needs)
         tool_reuse_context = self._tool_request_reuse_context(
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=4200,
+            max_chars=cfg.TOOL_REQUEST_REUSE_MAX_CHARS,
         )
         literature_packet = self._compose_literature_packet(
             literature_context,
@@ -1863,8 +1954,8 @@ class AutonomousResearchSystem:
                 "tool request verification numeric symbolic certificate"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=10000,
-            summary_max_chars=4000,
+            snippet_max_chars=cfg.TOOL_REQUEST_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.TOOL_REQUEST_LITERATURE_SUMMARY_MAX_CHARS,
         )
         clean_draft = self._strip_tool_reports(draft)
         retry_block = ""
@@ -1873,9 +1964,25 @@ class AutonomousResearchSystem:
                 "Previous tool-request attempt failed. Repair the tool requests only.\n"
                 f"Retry feedback:\n{str(retry_feedback).strip()}\n\n"
             )
+        decision_instruction = (
+            "Output a non-empty JSON array of executable numeric_1d verification requests. [] is forbidden on this forced retry.\n"
+            if force_numeric_1d
+            else "Decide whether the current proposition needs an external tool call, and output a JSON array. If no tool is needed, output [].\n"
+        )
+        forced_retry_block = ""
+        if force_numeric_1d:
+            forced_retry_block = (
+                "Forced fallback mode for Q5: the previous attempt failed to produce executable TOOL_REQUESTS while Verification Needs remained open.\n"
+                "Hard constraints for this retry:\n"
+                "- output a non-empty JSON array; [] is forbidden;\n"
+                "- every element must use tool_name=\"verification\";\n"
+                "- every spec.mode must be \"numeric_1d\"; symbolic_multivar is forbidden on this retry;\n"
+                "- every spec must include the required numeric_1d fields: status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes;\n"
+                "- if the full certificate is difficult, still output the simplest executable numeric_1d request that directly targets the unresolved Verification Needs.\n\n"
+            )
         prompt = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"{property_context}\n"
             f"Candidate ID: {candidate.candidate_id}\n"
             f"Candidate form: {candidate.form}\n"
@@ -1888,18 +1995,19 @@ class AutonomousResearchSystem:
             f"- Verification Focus: {str(proposition.get('verification_focus', '')).strip() or '[missing]'}\n"
             f"- Planner Says Requires Tool: {'yes' if self._parse_bool_flag(proposition.get('requires_tool')) else 'no'}\n\n"
             f"Planner Tool Plan:\n{self._render_tool_plan(tool_plan)}\n\n"
-            f"Current proposition draft:\n{self._truncate_for_prompt(clean_draft, max_chars=24000)}\n\n"
+            f"Current proposition draft:\n{self._truncate_for_prompt(clean_draft, max_chars=cfg.TOOL_REQUEST_DRAFT_MAX_CHARS)}\n\n"
             f"Verification Needs in the current draft:\n{verification_needs}\n\n"
             f"Reusable historical tool-request templates:\n{tool_reuse_context or '[none]'}\n\n"
             f"{retry_block}"
-            "Decide whether the current proposition needs an external tool call, and output a JSON array. If no tool is needed, output [].\n"
+            f"{forced_retry_block}"
+            f"{decision_instruction}"
             "Each element must contain: request_id, tool_name, justification, spec.\n"
             "Rules:\n"
             "1) You may request a tool only if it directly closes an unresolved Verification Need in the current proposition;\n"
             "1.1) Only when `Verification Needs` is exactly `None` may you output [];\n"
             "1.2) If `Verification Needs` is not `None`, [] is forbidden; you must give at least one executable tool request;\n"
             "2) The only supported tool_name is verification;\n"
-            "3) spec must be a JSON object executable by verification_tools, using mode=numeric_1d or mode=symbolic_multivar;\n"
+            f"3) spec must be a JSON object executable by verification_tools, using mode={'numeric_1d' if force_numeric_1d else 'numeric_1d or symbolic_multivar'};\n"
             "4) For mode=numeric_1d, spec must contain status, mode, strategy, variable, domain, inequalities, grid_points, lipschitz, tolerance, max_iterations, min_width, notes;\n"
             "5) For mode=symbolic_multivar, spec must contain status, mode, variables, assumptions, simplifications, partial_derivatives, inequality_checks, substitutions, notes;\n"
             "5.1) Every item in partial_derivatives must contain expression and wrt; the field name must be exactly wrt and may not be replaced by with_respect_to or any alias;\n"
@@ -1907,7 +2015,7 @@ class AutonomousResearchSystem:
             "5.3) Minimal valid symbolic_multivar example: partial_derivatives=[{\"expression\":\"cos(theta)/(cos(alpha)-cos(gamma))\",\"wrt\":\"alpha\"}], inequality_checks=[{\"expression\":\"cos(theta)*sin(alpha)/(cos(alpha)-cos(gamma))**2\",\"relation\":\">\",\"threshold\":0}];\n"
             "6) expression must be a Python mathematical expression using only variable names and sin/cos/tan/asin/acos/atan/sqrt/log/exp/abs/pi/e; do not use LaTeX and do not put comparison operators inside expression;\n"
             "7) Do not invent formulas not present in the paper or current candidate. If an expression is only a candidate rewrite or approximation, say so explicitly in justification or notes;\n"
-            "8) For Q5, if the key gap is a local one-dimensional numeric certificate, prefer numeric_1d. Use symbolic_multivar only when symbolic partial derivatives or symbolic inequalities are genuinely needed;\n"
+            f"8) For Q5, if the key gap is a local one-dimensional numeric certificate, {'use numeric_1d only on this forced retry; symbolic_multivar is forbidden' if force_numeric_1d else 'prefer numeric_1d. Use symbolic_multivar only when symbolic partial derivatives or symbolic inequalities are genuinely needed'};\n"
             "9) If `Verification Needs` is not `None`, you may not output [] merely because the spec is hard to write; instead, provide the most executable spec you can;\n"
             "10) Before output, self-check whether partial_derivatives uses wrt and whether inequality_checks uses expression/relation/threshold;\n"
             "11) Inside <TOOL_REQUESTS>, output only a JSON array."
@@ -1951,12 +2059,28 @@ class AutonomousResearchSystem:
                 }
             )
 
+        if force_numeric_1d and requests:
+            requests, invalid_requests = self._filter_executable_numeric_1d_requests(requests)
+            if invalid_requests:
+                candidate.append_log(
+                    "tool_requests_force_filtered",
+                    f"{property_name}:{proposition_id} discarded invalid force_numeric_1d tool requests",
+                    invalid_requests=invalid_requests,
+                )
+
         if not requests and not verification_closed:
-            candidate.append_log(
-                "tool_requests_invalid",
-                f"{property_name}:{proposition_id} returned empty tool requests despite open Verification Needs",
-                verification_needs=verification_needs,
-            )
+            if force_numeric_1d:
+                candidate.append_log(
+                    "tool_requests_force_invalid",
+                    f"{property_name}:{proposition_id} force_numeric_1d retry produced no executable requests",
+                    verification_needs=verification_needs,
+                )
+            else:
+                candidate.append_log(
+                    "tool_requests_invalid",
+                    f"{property_name}:{proposition_id} returned empty tool requests despite open Verification Needs",
+                    verification_needs=verification_needs,
+                )
 
         artifact_key = f"tool_requests_{property_name}_{proposition_id}"
         candidate.artifacts[artifact_key] = json.dumps(requests, ensure_ascii=False, indent=2)
@@ -1996,6 +2120,70 @@ class AutonomousResearchSystem:
             "Output a repaired executable TOOL_REQUESTS array. Keep the proposition draft unchanged and fix only the tool spec."
         )
         return "\n\n".join(part for part in parts if part).strip()
+
+    def _request_q5_tool_requests_with_forced_numeric_retry(
+        self,
+        candidate,
+        property_name,
+        proposition,
+        goal,
+        literature_context,
+        draft,
+        property_context,
+        property_guidance,
+        retry_feedback="",
+        force_reason="",
+    ):
+        requests = self._request_proposition_tool_requests(
+            candidate,
+            property_name,
+            proposition,
+            goal,
+            literature_context,
+            draft,
+            property_context,
+            property_guidance,
+            retry_feedback=retry_feedback,
+        )
+        if requests:
+            return requests
+
+        verification_needs = self._draft_verification_needs(draft)
+        if self._verification_needs_is_none(verification_needs):
+            return []
+
+        proposition_id = str((proposition or {}).get("id", "")).strip() or f"{property_name.lower()}_prop"
+        candidate.append_log(
+            "tool_requests_force_retry",
+            f"{property_name}:{proposition_id} forcing numeric_1d tool-request retry",
+            verification_needs=verification_needs,
+        )
+        combined_feedback = "\n\n".join(
+            part
+            for part in [str(retry_feedback or "").strip(), str(force_reason or "").strip()]
+            if part
+        ).strip()
+        forced_requests = self._request_proposition_tool_requests(
+            candidate,
+            property_name,
+            proposition,
+            goal,
+            literature_context,
+            draft,
+            property_context,
+            property_guidance,
+            retry_feedback=combined_feedback,
+            force_numeric_1d=True,
+        )
+        if forced_requests:
+            return forced_requests
+
+        candidate.append_log(
+            "tool_requests_force_failed",
+            f"{property_name}:{proposition_id} force_numeric_1d retry still produced no executable requests",
+            verification_needs=verification_needs,
+        )
+        return []
 
     def _execute_proposition_tool_requests(
         self,
@@ -2139,7 +2327,9 @@ class AutonomousResearchSystem:
         property_guidance,
         proposition_meta,
     ):
-        requests = self._request_proposition_tool_requests(
+        if property_name != "Q5" or not self._parse_bool_flag((proposition or {}).get("requires_tool")):
+            return draft, [], False
+        requests = self._request_q5_tool_requests_with_forced_numeric_retry(
             candidate,
             property_name,
             proposition,
@@ -2148,24 +2338,10 @@ class AutonomousResearchSystem:
             draft,
             property_context,
             property_guidance,
+            force_reason="The previous attempt returned empty TOOL_REQUESTS despite unresolved Verification Needs.",
         )
         if not requests:
-            retry_feedback = self._tool_request_retry_feedback(
-                "The previous attempt returned empty TOOL_REQUESTS despite unresolved Verification Needs."
-            )
-            requests = self._request_proposition_tool_requests(
-                candidate,
-                property_name,
-                proposition,
-                goal,
-                literature_context,
-                draft,
-                property_context,
-                property_guidance,
-                retry_feedback=retry_feedback,
-            )
-            if not requests:
-                return draft, [], False
+            return draft, [], False
 
         draft, report_payloads, certified = self._execute_proposition_tool_requests(
             candidate,
@@ -2207,7 +2383,7 @@ class AutonomousResearchSystem:
             requests=requests,
             reports=report_payloads,
         )
-        repaired_requests = self._request_proposition_tool_requests(
+        repaired_requests = self._request_q5_tool_requests_with_forced_numeric_retry(
             candidate,
             property_name,
             proposition,
@@ -2217,6 +2393,7 @@ class AutonomousResearchSystem:
             property_context,
             property_guidance,
             retry_feedback=retry_feedback,
+            force_reason="The repaired tool-request attempt still failed to produce executable TOOL_REQUESTS while Verification Needs remained open.",
         )
         if not repaired_requests:
             return draft, report_payloads, False
@@ -2275,23 +2452,23 @@ class AutonomousResearchSystem:
                 f"{proposition_claim}\n{verification_focus}\n{dependencies}"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=12000,
-            summary_max_chars=5000,
+            snippet_max_chars=cfg.PROPOSITION_WRITER_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.PROPOSITION_WRITER_LITERATURE_SUMMARY_MAX_CHARS,
         )
         dependency_context = self._proposition_dependency_context(candidate, property_name, proposition)
         reuse_context = self._property_reuse_context(
             candidate,
             property_name,
             max_items=MEMORY_REUSE_MAX_ITEMS,
-            max_chars=4200,
+            max_chars=cfg.PROPOSITION_WRITER_REUSE_MAX_CHARS,
         )
         prompt_base = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"{property_context}\n"
-            f"Candidate/property memory:\n{memory_context or '[none]'}\n\n"
+            f"Property learning memory:\n{memory_context or '[none]'}\n\n"
             f"Current property contract:\n{property_guidance or '[no additional contract]'}\n\n"
-            f"Reusable historical proposition templates:\n{reuse_context or '[none]'}\n\n"
+            f"Reusable proposition exemplars:\n{reuse_context or '[none]'}\n\n"
             "Current proposition:\n"
             f"- ID: {proposition.get('id', '[missing]')}\n"
             f"- Title: {proposition_title}\n"
@@ -2507,7 +2684,7 @@ class AutonomousResearchSystem:
                         "prune",
                         "proposition blocked by unresolved verification needs",
                         proposition_id=proposition.get("id", ""),
-                        verification_needs=self._truncate_for_prompt(verification_needs, max_chars=800),
+                        verification_needs=self._truncate_for_prompt(verification_needs, max_chars=cfg.PROPOSITION_FAIL_LOG_VERIFICATION_NEEDS_MAX_CHARS),
                     )
                     return False, "", False
                 candidate.mark_proposition(
@@ -2620,7 +2797,7 @@ class AutonomousResearchSystem:
         candidate.mark_property(
             property_name,
             "pass",
-            note=" | ".join(final_notes[:3]) if final_notes else f"{len(proposition_outputs)} propositions passed",
+            note=" | ".join(final_notes[: cfg.PROPERTY_PASS_NOTE_MAX_ITEMS] if cfg.PROPERTY_PASS_NOTE_MAX_ITEMS > 0 else final_notes) if final_notes else f"{len(proposition_outputs)} propositions passed",
             artifact_key=artifact_key,
         )
         candidate.append_log(
@@ -2646,12 +2823,12 @@ class AutonomousResearchSystem:
                 f"{self._candidate_property_snapshot(candidate)}"
             ),
             top_k=LITERATURE_RAG_TOP_K,
-            snippet_max_chars=12000,
-            summary_max_chars=5000,
+            snippet_max_chars=cfg.PROOF_REFINEMENT_LITERATURE_SNIPPET_MAX_CHARS,
+            summary_max_chars=cfg.PROOF_REFINEMENT_LITERATURE_SUMMARY_MAX_CHARS,
         )
         prompt_base = (
             f"Overall goal: {goal}\n"
-            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=120000)}\n\n"
+            f"Key literature context:\n{self._truncate_for_prompt(literature_packet, max_chars=cfg.PROMPT_LITERATURE_PACKET_MAX_CHARS)}\n\n"
             f"Candidate ID: {candidate.candidate_id}\n"
             f"Candidate form: {candidate.form}\n"
             f"Design intuition: {candidate.intuition or '[missing]'}\n"
@@ -2660,7 +2837,7 @@ class AutonomousResearchSystem:
             f"Property Snapshot: {self._candidate_property_snapshot(candidate)}\n"
             f"Terminal Report:\n{candidate.artifacts.get('terminal_report', '[missing]')}\n\n"
             "Passed property proof material:\n"
-            f"{self._truncate_for_prompt(property_bundle, max_chars=80000)}\n\n"
+            f"{self._truncate_for_prompt(property_bundle, max_chars=cfg.PROOF_REFINEMENT_PROPERTY_BUNDLE_MAX_CHARS)}\n\n"
             "You are now in proof refinement. Organize the already-passed local properties into a more coherent candidate proof package that helps judge whether this candidate deserves further manual deepening.\n"
             "Use exactly the following Markdown skeleton:\n"
             "## Candidate Statement\n"
@@ -2745,6 +2922,8 @@ class AutonomousResearchSystem:
             "",
             "## Candidate Search Summary",
             f"- Architecture Mode: {self.architecture_mode}",
+            f"- Prompt Snapshot Hash: {self.prompt_snapshot_hash or '[missing]'}",
+            f"- Memory Namespace: {self.memory_namespace or self.memory.namespace_label()}",
             f"- Passed Candidates: {len(passed_candidates)}",
             f"- Pruned Candidates: {len(pruned_candidates)}",
         ]

@@ -5,17 +5,11 @@ import sqlite3
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 
-from .app_config import (
-    DISABLE_TEXT_TRUNCATION,
-    MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-    MEMORY_REUSE_MAX_ITEMS,
-    MEMORY_SIMILAR_FAILURE_LIMIT,
-    MEMORY_SUMMARIZE_MAX_CANDIDATES,
-    MEMORY_TERMINAL_REPORT_MAX_ITEMS,
-)
+from . import app_config as cfg
 
 
 DEFAULT_PROPERTIES = ("N1", "N2", "N3", "D4", "Q5", "Q6")
+LEGACY_MEMORY_NAMESPACE = "legacy::unscoped"
 PROPERTY_DEPENDENCIES = {
     "N1": "N1 失败会破坏 Lemma 2 的基础情形，因此后续局部递推不再可信。",
     "N2": "N2 失败意味着去末端盘单调性丢失，Prop 2 一般不可复用。",
@@ -24,6 +18,17 @@ PROPERTY_DEPENDENCIES = {
     "Q5": "Q5 失败意味着局部目标函数导数控制不足，Prop 7 的数值/导数验证链断裂。",
     "Q6": "Q6 失败意味着极端链下界常数不可控，Lemma 3 无法给出改进后的全局界。",
 }
+
+
+def _normalize_namespace_component(value, fallback):
+    cleaned = re.sub(r"[^A-Za-z0-9._:-]+", "_", str(value or "").strip()).strip("._:-")
+    return cleaned or str(fallback or "").strip() or "unknown"
+
+
+def build_memory_namespace(architecture_mode="", prompt_snapshot_hash=""):
+    mode = _normalize_namespace_component(architecture_mode, "legacy")
+    prompt_hash = _normalize_namespace_component(prompt_snapshot_hash, "unscoped")
+    return f"{mode}::{prompt_hash}"
 
 
 @dataclass
@@ -154,12 +159,14 @@ class CandidateRecord:
         )
         bucket["items"][pid] = entry
 
-    def proposition_snapshot(self, property_name, max_items=6):
+    def proposition_snapshot(self, property_name, max_items=cfg.MEMORY_PROPOSITION_SNAPSHOT_MAX_ITEMS):
         bucket = self.proposition_status.get(str(property_name or "").strip()) or {}
         plan = bucket.get("plan") or []
         items = bucket.get("items") or {}
         bits = []
-        for proposition_id in plan[: max(0, int(max_items)) or len(plan)]:
+        item_limit = MemoryManager._normalize_limit(max_items)
+        iterable = plan[:item_limit] if item_limit > 0 else plan
+        for proposition_id in iterable:
             detail = items.get(proposition_id) or {}
             bits.append(f"{proposition_id}={detail.get('status', 'planned')}")
         return ", ".join(bits)
@@ -314,13 +321,27 @@ class MemoryManager:
     @staticmethod
     def _truncate_text(text, max_chars=0):
         rendered = str(text or "").strip()
-        if DISABLE_TEXT_TRUNCATION:
+        if cfg.DISABLE_TEXT_TRUNCATION:
             return rendered
         if max_chars > 0 and len(rendered) > max_chars:
             return rendered[:max_chars]
         return rendered
 
-    def __init__(self, store_path):
+    @staticmethod
+    def _normalize_limit(limit):
+        try:
+            return max(0, int(limit or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _limited_iterable(cls, items, limit):
+        normalized = cls._normalize_limit(limit)
+        if normalized <= 0:
+            return items
+        return items[:normalized]
+
+    def __init__(self, store_path, *, architecture_mode="", prompt_snapshot_hash="", namespace=""):
         requested_path = os.path.abspath(store_path)
         root, ext = os.path.splitext(requested_path)
         if ext.lower() == ".jsonl":
@@ -331,8 +352,39 @@ class MemoryManager:
             self.legacy_jsonl_path = sibling_jsonl if os.path.exists(sibling_jsonl) else ""
             self.store_path = requested_path
         self.legacy_archive_path = root + ".legacy.jsonl"
+        self.architecture_mode = ""
+        self.prompt_snapshot_hash = ""
+        self.namespace = ""
         os.makedirs(os.path.dirname(self.store_path), exist_ok=True)
         self._initialize_store()
+        self.set_namespace(
+            architecture_mode=architecture_mode,
+            prompt_snapshot_hash=prompt_snapshot_hash,
+            namespace=namespace,
+        )
+
+    def set_namespace(self, *, architecture_mode="", prompt_snapshot_hash="", namespace=""):
+        explicit_namespace = str(namespace or "").strip()
+        if explicit_namespace:
+            resolved = explicit_namespace
+        elif str(architecture_mode or "").strip() or str(prompt_snapshot_hash or "").strip():
+            resolved = build_memory_namespace(architecture_mode, prompt_snapshot_hash)
+        else:
+            resolved = ""
+        self.architecture_mode = str(architecture_mode or "").strip()
+        self.prompt_snapshot_hash = str(prompt_snapshot_hash or "").strip()
+        self.namespace = resolved
+        return self.namespace
+
+    def current_namespace(self, default_to_legacy=False):
+        if self.namespace:
+            return self.namespace
+        if default_to_legacy:
+            return LEGACY_MEMORY_NAMESPACE
+        return ""
+
+    def namespace_label(self):
+        return self.current_namespace(default_to_legacy=True)
 
     def _connect(self):
         conn = sqlite3.connect(self.store_path)
@@ -353,6 +405,7 @@ class MemoryManager:
             """
             CREATE TABLE IF NOT EXISTS candidate_snapshots (
                 snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_namespace TEXT NOT NULL DEFAULT '',
                 candidate_id TEXT NOT NULL,
                 saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 status TEXT NOT NULL,
@@ -360,19 +413,12 @@ class MemoryManager:
                 form TEXT NOT NULL,
                 source_direction TEXT,
                 estimated_c TEXT,
+                architecture_mode TEXT,
+                prompt_snapshot_hash TEXT,
                 payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_candidate
                 ON candidate_snapshots(candidate_id, snapshot_id DESC);
-
-            CREATE TABLE IF NOT EXISTS candidate_latest (
-                candidate_id TEXT PRIMARY KEY,
-                snapshot_id INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                derived_from TEXT,
-                form TEXT NOT NULL,
-                FOREIGN KEY(snapshot_id) REFERENCES candidate_snapshots(snapshot_id)
-            );
 
             CREATE TABLE IF NOT EXISTS property_states (
                 snapshot_id INTEGER NOT NULL,
@@ -437,6 +483,96 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_tool_request_states_lookup
                 ON tool_request_states(property_name, proposition_id, report_status, snapshot_id DESC);
+            """
+        )
+        self._ensure_candidate_snapshot_columns(conn)
+        self._backfill_legacy_namespaces(conn)
+        self._rebuild_candidate_latest_table(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_namespace_candidate
+                ON candidate_snapshots(memory_namespace, candidate_id, snapshot_id DESC)
+            """
+        )
+
+    @staticmethod
+    def _table_columns(conn, table_name):
+        return {
+            str(row["name"]).strip()
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+
+    def _ensure_candidate_snapshot_columns(self, conn):
+        columns = self._table_columns(conn, "candidate_snapshots")
+        if "memory_namespace" not in columns:
+            conn.execute(
+                "ALTER TABLE candidate_snapshots ADD COLUMN memory_namespace TEXT NOT NULL DEFAULT ''"
+            )
+        if "architecture_mode" not in columns:
+            conn.execute("ALTER TABLE candidate_snapshots ADD COLUMN architecture_mode TEXT")
+        if "prompt_snapshot_hash" not in columns:
+            conn.execute("ALTER TABLE candidate_snapshots ADD COLUMN prompt_snapshot_hash TEXT")
+
+    def _backfill_legacy_namespaces(self, conn):
+        conn.execute(
+            """
+            UPDATE candidate_snapshots
+            SET memory_namespace = ?
+            WHERE TRIM(COALESCE(memory_namespace, '')) = ''
+            """,
+            (LEGACY_MEMORY_NAMESPACE,),
+        )
+
+    def _rebuild_candidate_latest_table(self, conn):
+        conn.execute("DROP TABLE IF EXISTS candidate_latest_rebuild")
+        conn.execute(
+            """
+            CREATE TABLE candidate_latest_rebuild (
+                memory_namespace TEXT NOT NULL,
+                candidate_id TEXT NOT NULL,
+                snapshot_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                derived_from TEXT,
+                form TEXT NOT NULL,
+                architecture_mode TEXT,
+                prompt_snapshot_hash TEXT,
+                PRIMARY KEY(memory_namespace, candidate_id),
+                FOREIGN KEY(snapshot_id) REFERENCES candidate_snapshots(snapshot_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO candidate_latest_rebuild (
+                memory_namespace, candidate_id, snapshot_id, status, derived_from, form,
+                architecture_mode, prompt_snapshot_hash
+            )
+            SELECT
+                cs.memory_namespace,
+                cs.candidate_id,
+                cs.snapshot_id,
+                cs.status,
+                cs.derived_from,
+                cs.form,
+                COALESCE(cs.architecture_mode, ''),
+                COALESCE(cs.prompt_snapshot_hash, '')
+            FROM candidate_snapshots cs
+            JOIN (
+                SELECT memory_namespace, candidate_id, MAX(snapshot_id) AS snapshot_id
+                FROM candidate_snapshots
+                GROUP BY memory_namespace, candidate_id
+            ) latest
+                ON latest.memory_namespace = cs.memory_namespace
+               AND latest.candidate_id = cs.candidate_id
+               AND latest.snapshot_id = cs.snapshot_id
+            """
+        )
+        conn.execute("DROP TABLE IF EXISTS candidate_latest")
+        conn.execute("ALTER TABLE candidate_latest_rebuild RENAME TO candidate_latest")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candidate_latest_namespace_status
+                ON candidate_latest(memory_namespace, status, snapshot_id DESC)
             """
         )
 
@@ -521,10 +657,16 @@ class MemoryManager:
         cleaned = re.sub(r"[^A-Za-z0-9_:-]+", "_", cleaned).strip("_")
         return cleaned or str(fallback_prefix or "candidate").strip() or "candidate"
 
-    def _candidate_id_exists_conn(self, conn, candidate_id):
+    def _candidate_id_exists_conn(self, conn, candidate_id, namespace=None):
+        clauses = ["candidate_id = ?"]
+        params = [str(candidate_id or "").strip()]
+        active_namespace = str(namespace or self.current_namespace(default_to_legacy=True)).strip()
+        if active_namespace:
+            clauses.append("memory_namespace = ?")
+            params.append(active_namespace)
         row = conn.execute(
-            "SELECT 1 FROM candidate_snapshots WHERE candidate_id = ? LIMIT 1",
-            (str(candidate_id or "").strip(),),
+            "SELECT 1 FROM candidate_snapshots WHERE " + " AND ".join(clauses) + " LIMIT 1",
+            params,
         ).fetchone()
         return bool(row)
 
@@ -535,13 +677,14 @@ class MemoryManager:
 
     def make_unique_candidate_id(self, candidate_id, fallback_prefix="candidate"):
         base = self._normalize_candidate_id(candidate_id, fallback_prefix=fallback_prefix)
+        active_namespace = self.current_namespace(default_to_legacy=True)
         with self._connect() as conn:
-            if not self._candidate_id_exists_conn(conn, base):
+            if not self._candidate_id_exists_conn(conn, base, namespace=active_namespace):
                 return base
             suffix = 2
             while True:
                 candidate = f"{base}__v{suffix}"
-                if not self._candidate_id_exists_conn(conn, candidate):
+                if not self._candidate_id_exists_conn(conn, candidate, namespace=active_namespace):
                     return candidate
                 suffix += 1
 
@@ -549,18 +692,22 @@ class MemoryManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT candidate_id, COUNT(DISTINCT TRIM(form)) AS form_count, COUNT(*) AS snapshot_count
+                SELECT
+                    memory_namespace,
+                    candidate_id,
+                    COUNT(DISTINCT TRIM(form)) AS form_count,
+                    COUNT(*) AS snapshot_count
                 FROM candidate_snapshots
-                GROUP BY candidate_id
+                GROUP BY memory_namespace, candidate_id
                 HAVING COUNT(DISTINCT TRIM(form)) > 1
-                ORDER BY snapshot_count DESC, candidate_id ASC
+                ORDER BY snapshot_count DESC, memory_namespace ASC, candidate_id ASC
                 LIMIT 20
                 """
             ).fetchall()
         if not rows:
             return
         rendered = ", ".join(
-            f"{str(row['candidate_id'])}[forms={int(row['form_count'])}, snapshots={int(row['snapshot_count'])}]"
+            f"{str(row['memory_namespace'])}/{str(row['candidate_id'])}[forms={int(row['form_count'])}, snapshots={int(row['snapshot_count'])}]"
             for row in rows
         )
         print(
@@ -575,14 +722,15 @@ class MemoryManager:
         record.ensure_properties()
         payload = record.to_dict()
         payload_json = self._canonical_payload_json(payload)
+        active_namespace = self.current_namespace(default_to_legacy=True)
         latest = conn.execute(
             """
             SELECT cs.snapshot_id, cs.payload_json
             FROM candidate_latest cl
             JOIN candidate_snapshots cs ON cs.snapshot_id = cl.snapshot_id
-            WHERE cl.candidate_id = ?
+            WHERE cl.memory_namespace = ? AND cl.candidate_id = ?
             """,
-            (record.candidate_id,),
+            (active_namespace, record.candidate_id),
         ).fetchone()
         if latest is not None:
             existing_payload = self._canonical_payload_json(str(latest["payload_json"] or ""))
@@ -591,36 +739,48 @@ class MemoryManager:
         cursor = conn.execute(
             """
             INSERT INTO candidate_snapshots (
-                candidate_id, status, derived_from, form, source_direction, estimated_c, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                memory_namespace, candidate_id, status, derived_from, form, source_direction, estimated_c,
+                architecture_mode, prompt_snapshot_hash, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                active_namespace,
                 record.candidate_id,
                 record.status,
                 record.derived_from,
                 record.form,
                 record.source_direction,
                 record.estimated_c,
+                self.architecture_mode,
+                self.prompt_snapshot_hash,
                 payload_json,
             ),
         )
         snapshot_id = int(cursor.lastrowid)
         conn.execute(
             """
-            INSERT INTO candidate_latest (candidate_id, snapshot_id, status, derived_from, form)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(candidate_id) DO UPDATE SET
+            INSERT INTO candidate_latest (
+                memory_namespace, candidate_id, snapshot_id, status, derived_from, form,
+                architecture_mode, prompt_snapshot_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_namespace, candidate_id) DO UPDATE SET
                 snapshot_id=excluded.snapshot_id,
                 status=excluded.status,
                 derived_from=excluded.derived_from,
-                form=excluded.form
+                form=excluded.form,
+                architecture_mode=excluded.architecture_mode,
+                prompt_snapshot_hash=excluded.prompt_snapshot_hash
             """,
             (
+                active_namespace,
                 record.candidate_id,
                 snapshot_id,
                 record.status,
                 record.derived_from,
                 record.form,
+                self.architecture_mode,
+                self.prompt_snapshot_hash,
             ),
         )
 
@@ -736,7 +896,12 @@ class MemoryManager:
             items = list(status_filter)
         return [str(item).strip().lower() for item in items if str(item).strip()]
 
-    def query_candidate_library(self, status_filter=None, property_name=None, property_status=None, limit=0):
+    def _query_namespace(self, namespace=None):
+        if namespace is not None:
+            return str(namespace or "").strip()
+        return self.current_namespace(default_to_legacy=False)
+
+    def query_candidate_library(self, status_filter=None, property_name=None, property_status=None, limit=0, namespace=None):
         clauses = []
         params = []
         sql = [
@@ -744,6 +909,10 @@ class MemoryManager:
             "FROM candidate_latest cl",
             "JOIN candidate_snapshots cs ON cs.snapshot_id = cl.snapshot_id",
         ]
+        active_namespace = self._query_namespace(namespace)
+        if active_namespace:
+            clauses.append("cl.memory_namespace = ?")
+            params.append(active_namespace)
         if property_name:
             sql.append(
                 "JOIN property_states ps ON ps.snapshot_id = cs.snapshot_id AND ps.candidate_id = cs.candidate_id"
@@ -767,17 +936,21 @@ class MemoryManager:
             rows = conn.execute("\n".join(sql), params).fetchall()
         return [self._row_to_candidate(row) for row in rows]
 
-    def load_latest_candidates(self):
-        records = self.query_candidate_library(limit=0)
+    def load_latest_candidates(self, namespace=None):
+        records = self.query_candidate_library(limit=0, namespace=namespace)
         records.reverse()
         return records
 
-    def query_proposition_library(self, property_name, status_filter=None, requires_tool=None, limit=0):
+    def query_proposition_library(self, property_name, status_filter=None, requires_tool=None, limit=0, namespace=None):
         prop = str(property_name or "").strip()
         if not prop:
             return []
         clauses = ["ps.property_name = ?"]
         params = [prop]
+        active_namespace = self._query_namespace(namespace)
+        if active_namespace:
+            clauses.append("cl.memory_namespace = ?")
+            params.append(active_namespace)
         statuses = self._normalize_status_filter(status_filter)
         if statuses:
             clauses.append("LOWER(ps.status) IN (%s)" % ",".join("?" for _ in statuses))
@@ -860,9 +1033,14 @@ class MemoryManager:
         report_status=None,
         tool_name=None,
         limit=0,
+        namespace=None,
     ):
         clauses = ["1=1"]
         params = []
+        active_namespace = self._query_namespace(namespace)
+        if active_namespace:
+            clauses.append("cl.memory_namespace = ?")
+            params.append(active_namespace)
         if property_name:
             clauses.append("trs.property_name = ?")
             params.append(str(property_name).strip())
@@ -931,7 +1109,7 @@ class MemoryManager:
             for row in rows
         ]
 
-    def find_similar_failures(self, form_text, limit=MEMORY_SIMILAR_FAILURE_LIMIT, property_name=None):
+    def find_similar_failures(self, form_text, limit=cfg.MEMORY_SIMILAR_FAILURE_LIMIT, property_name=None, namespace=None):
         query = self._tokenize(form_text)
         scored = []
         for record in self.query_candidate_library(
@@ -939,14 +1117,22 @@ class MemoryManager:
             property_name=property_name,
             property_status="fail" if property_name else None,
             limit=0,
+            namespace=namespace,
         ):
             score = len(query & self._tokenize(record.form))
             if score:
                 scored.append((score, record))
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [record for _, record in scored[: max(0, int(limit))]]
+        records = [record for _, record in scored]
+        return list(self._limited_iterable(records, limit))
 
     def aggregate_failure_patterns(self):
+        clauses = []
+        params = []
+        active_namespace = self._query_namespace()
+        if active_namespace:
+            clauses.append("cl.memory_namespace = ?")
+            params.append(active_namespace)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -955,9 +1141,13 @@ class MemoryManager:
                 JOIN candidate_latest cl
                     ON cl.candidate_id = ps.candidate_id AND cl.snapshot_id = ps.snapshot_id
                 WHERE LOWER(ps.status) = 'fail'
+                """
+                + (" AND " + " AND ".join(clauses) if clauses else "")
+                + """
                 GROUP BY ps.property_name
                 ORDER BY ps.property_name ASC
-                """
+                """,
+                params,
             ).fetchall()
         return {str(row["property_name"]): int(row["fail_count"]) for row in rows}
 
@@ -973,23 +1163,74 @@ class MemoryManager:
             children[key].sort()
         return {"nodes": nodes, "children": children}
 
-    def recent_terminal_candidates(self, limit=6):
+    def recent_terminal_candidates(self, limit=cfg.MEMORY_TERMINAL_REPORT_MAX_ITEMS):
         items = self.query_candidate_library(status_filter={"pruned", "passed"}, limit=limit or 0)
         items.reverse()
-        if limit and len(items) > int(limit):
-            items = items[-int(limit) :]
+        normalized_limit = self._normalize_limit(limit)
+        if normalized_limit > 0 and len(items) > normalized_limit:
+            items = items[-normalized_limit :]
         return items
 
-    def dependency_knowledge_summary(self, max_items=6):
+    @staticmethod
+    def _candidate_property_bits(record, include_untested=False):
+        bits = []
+        for prop in DEFAULT_PROPERTIES:
+            detail = record.property_status.get(prop) or {}
+            status = str(detail.get("status", "")).strip() or "untested"
+            if status == "untested" and not include_untested:
+                continue
+            bits.append(f"{prop}={status}")
+        return bits
+
+    @staticmethod
+    def _short_text(text, max_chars=180):
+        rendered = re.sub(r"\s+", " ", str(text or "").strip())
+        if not rendered:
+            return ""
+        if max_chars > 0 and len(rendered) > max_chars:
+            return rendered[: max_chars - 3].rstrip() + "..."
+        return rendered
+
+    def recent_candidate_summary(
+        self,
+        max_items=cfg.MEMORY_SUMMARIZE_MAX_CANDIDATES,
+        max_chars=cfg.MEMORY_RECENT_CANDIDATE_SUMMARY_MAX_CHARS,
+    ):
+        latest = self.load_latest_candidates()
+        item_limit = self._normalize_limit(max_items)
+        recent = latest[-item_limit:] if item_limit > 0 else latest
         lines = []
-        for prop in DEFAULT_PROPERTIES[: max(0, int(max_items)) or len(DEFAULT_PROPERTIES)]:
+        for record in recent:
+            prop_bits = self._candidate_property_bits(record, include_untested=False)
+            line = (
+                f"- {record.candidate_id}: status={record.status}; form={self._short_text(record.form, max_chars=cfg.MEMORY_RECENT_CANDIDATE_FORM_PREVIEW_MAX_CHARS)}; "
+                f"properties={', '.join(prop_bits) or '[none]'}"
+            )
+            if record.derived_from:
+                line += f"; derived_from={record.derived_from}"
+            if record.pruned_reason:
+                line += f"; pruned_reason={self._short_text(record.pruned_reason, max_chars=cfg.MEMORY_RECENT_CANDIDATE_REASON_PREVIEW_MAX_CHARS)}"
+            elif record.risk_notes:
+                line += f"; risk={self._short_text(record.risk_notes, max_chars=cfg.MEMORY_RECENT_CANDIDATE_RISK_PREVIEW_MAX_CHARS)}"
+            if record.terminal_decision.get("action"):
+                line += f"; decision={record.terminal_decision.get('action')}"
+            lines.append(line)
+        return self._truncate_text("\n".join(lines).strip() or "暂无历史候选。", max_chars=max_chars)
+
+    def dependency_knowledge_summary(self, max_items=cfg.MEMORY_DEPENDENCY_KNOWLEDGE_MAX_ITEMS):
+        lines = []
+        item_limit = self._normalize_limit(max_items)
+        iterable = DEFAULT_PROPERTIES[:item_limit] if item_limit > 0 else DEFAULT_PROPERTIES
+        for prop in iterable:
             note = PROPERTY_DEPENDENCIES.get(prop, "")
             if note:
                 lines.append(f"- {prop}: {note}")
         return "\n".join(lines).strip()
 
-    def heuristic_summary(self, max_items=6):
-        recent = self.recent_terminal_candidates(limit=max_items * 2 or 6)
+    def heuristic_summary(self, max_items=cfg.MEMORY_HEURISTIC_MAX_ITEMS):
+        item_limit = self._normalize_limit(max_items)
+        lookback = (item_limit * 2) if item_limit > 0 else 0
+        recent = self.recent_terminal_candidates(limit=lookback)
         lines = []
         seen = set()
         for record in reversed(recent):
@@ -1008,19 +1249,21 @@ class MemoryManager:
                     continue
                 seen.add(heuristic)
                 lines.append(f"- {heuristic}")
-                if len(lines) >= max_items:
+                if item_limit > 0 and len(lines) >= item_limit:
                     return "\n".join(lines).strip()
         if not lines:
             return "- 暂无可提炼的失败启发式。"
         return "\n".join(lines).strip()
 
-    def proposition_history_summary(self, property_name, status_filter=None, max_items=6):
+    def proposition_history_summary(self, property_name, status_filter=None, max_items=cfg.MEMORY_PROPOSITION_HISTORY_MAX_ITEMS):
         want_status = set(self._normalize_status_filter(status_filter))
         if not str(property_name or "").strip():
             return ""
+        item_limit = self._normalize_limit(max_items)
         lines = []
         seen = set()
-        for entry in self.query_proposition_library(property_name, status_filter=want_status, limit=max_items * 8 or 12):
+        query_limit = item_limit * 8 if item_limit > 0 else 0
+        for entry in self.query_proposition_library(property_name, status_filter=want_status, limit=query_limit):
             status = str(entry.get("status", "")).strip().lower()
             if want_status and status not in want_status:
                 continue
@@ -1037,18 +1280,54 @@ class MemoryManager:
                 f"- {entry['candidate_id']}/{entry['proposition_id']}: status={status}; "
                 f"title={title}; focus={focus}; note={note}"
             )
-            if len(lines) >= max_items:
+            if item_limit > 0 and len(lines) >= item_limit:
                 break
         return "\n".join(lines).strip()
 
-    def tool_request_history_summary(self, property_name, report_status=None, max_items=6):
+    def similar_failure_summary(
+        self,
+        form_text,
+        property_name=None,
+        limit=cfg.MEMORY_SIMILAR_FAILURE_LIMIT,
+        max_chars=cfg.MEMORY_SIMILAR_FAILURE_SUMMARY_MAX_CHARS,
+    ):
+        prop = str(property_name or "").strip()
+        lines = []
+        for record in self.find_similar_failures(form_text, limit=limit, property_name=prop or None):
+            if prop:
+                detail = record.property_status.get(prop) or {}
+                status = str(detail.get("status", "")).strip() or "unknown"
+                note = str(detail.get("note", "")).strip() or record.pruned_reason or "[无]"
+                lines.append(
+                    f"- {record.candidate_id}: form={self._short_text(record.form, max_chars=cfg.MEMORY_SIMILAR_FAILURE_FORM_PREVIEW_MAX_CHARS)}; "
+                    f"{prop}={status}; reason={self._short_text(note, max_chars=cfg.MEMORY_SIMILAR_FAILURE_REASON_PREVIEW_MAX_CHARS)}"
+                )
+                continue
+            failed_props = []
+            for candidate_prop in DEFAULT_PROPERTIES:
+                detail = record.property_status.get(candidate_prop) or {}
+                status = str(detail.get("status", "")).strip().lower()
+                if status == "fail":
+                    note = str(detail.get("note", "")).strip() or record.pruned_reason or "[无]"
+                    failed_props.append(
+                        f"{candidate_prop}:{self._short_text(note, max_chars=cfg.MEMORY_SIMILAR_FAILURE_PROP_NOTE_PREVIEW_MAX_CHARS)}"
+                    )
+            lines.append(
+                f"- {record.candidate_id}: form={self._short_text(record.form, max_chars=cfg.MEMORY_SIMILAR_FAILURE_FORM_PREVIEW_MAX_CHARS)}; "
+                f"fails={'; '.join(failed_props) or '[unknown]'}"
+            )
+        return self._truncate_text("\n".join(lines).strip(), max_chars=max_chars)
+
+    def tool_request_history_summary(self, property_name, report_status=None, max_items=cfg.MEMORY_TOOL_HISTORY_MAX_ITEMS):
         prop = str(property_name or "").strip()
         if not prop:
             return ""
         want_status = self._normalize_status_filter([report_status] if report_status else None)
+        item_limit = self._normalize_limit(max_items)
         lines = []
         seen = set()
-        for entry in self.query_tool_request_library(property_name=prop, limit=max_items * 8 or 12):
+        query_limit = item_limit * 8 if item_limit > 0 else 0
+        for entry in self.query_tool_request_library(property_name=prop, limit=query_limit):
             status = str(entry.get("report_status", "")).strip().lower()
             if want_status and status not in want_status:
                 continue
@@ -1070,7 +1349,7 @@ class MemoryManager:
                 f"tool={entry.get('tool_name', 'unknown')}; mode={spec.get('mode', '[none]')}; "
                 f"status={status}; summary={str(report.get('summary', '')).strip() or '[none]'}"
             )
-            if len(lines) >= max_items:
+            if item_limit > 0 and len(lines) >= item_limit:
                 break
         return "\n".join(lines).strip()
 
@@ -1078,14 +1357,16 @@ class MemoryManager:
         self,
         property_name,
         form_text="",
-        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_items=cfg.MEMORY_REUSE_MAX_ITEMS,
     ):
         prop = str(property_name or "").strip()
         if not prop:
             return []
         query_tokens = self._tokenize(form_text)
+        item_limit = self._normalize_limit(max_items)
         candidates = []
-        for entry in self.query_proposition_library(prop, status_filter={"pass"}, limit=max_items * 12 or 24):
+        query_limit = item_limit * 12 if item_limit > 0 else 0
+        for entry in self.query_proposition_library(prop, status_filter={"pass"}, limit=query_limit):
             artifact = str(entry.get("artifact_content", ""))
             claim = str(entry.get("claim", "")).strip() or self._extract_markdown_section(artifact, "Claim")
             conclusion = self._extract_markdown_section(artifact, "Conclusion") or str(entry.get("note", "")).strip()
@@ -1126,7 +1407,7 @@ class MemoryManager:
                 continue
             seen.add(signature)
             selected.append(payload)
-            if len(selected) >= max_items:
+            if item_limit > 0 and len(selected) >= item_limit:
                 break
         return selected
 
@@ -1134,14 +1415,16 @@ class MemoryManager:
         self,
         property_name,
         form_text="",
-        max_items=MEMORY_REUSE_MAX_ITEMS,
+        max_items=cfg.MEMORY_REUSE_MAX_ITEMS,
     ):
         prop = str(property_name or "").strip()
         if not prop:
             return []
         query_tokens = self._tokenize(form_text)
+        item_limit = self._normalize_limit(max_items)
         candidates = []
-        for entry in self.query_tool_request_library(property_name=prop, report_status="verified_pass", limit=max_items * 12 or 24):
+        query_limit = item_limit * 12 if item_limit > 0 else 0
+        for entry in self.query_tool_request_library(property_name=prop, report_status="verified_pass", limit=query_limit):
             spec = entry.get("spec") or {}
             report = entry.get("report") or {}
             text_blob = " ".join(
@@ -1180,7 +1463,7 @@ class MemoryManager:
                 continue
             seen.add(signature)
             selected.append(payload)
-            if len(selected) >= max_items:
+            if item_limit > 0 and len(selected) >= item_limit:
                 break
         return selected
 
@@ -1188,8 +1471,8 @@ class MemoryManager:
         self,
         property_name,
         form_text="",
-        max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=5000,
+        max_items=cfg.MEMORY_REUSE_MAX_ITEMS,
+        max_chars=cfg.MEMORY_PROPOSITION_REUSE_PACKET_MAX_CHARS,
     ):
         examples = self.reusable_proposition_examples(
             property_name,
@@ -1219,8 +1502,8 @@ class MemoryManager:
         self,
         property_name,
         form_text="",
-        max_items=MEMORY_REUSE_MAX_ITEMS,
-        max_chars=4500,
+        max_items=cfg.MEMORY_REUSE_MAX_ITEMS,
+        max_chars=cfg.MEMORY_TOOL_REQUEST_REUSE_PACKET_MAX_CHARS,
     ):
         examples = self.reusable_tool_request_examples(
             property_name,
@@ -1243,12 +1526,12 @@ class MemoryManager:
             )
         return self._truncate_text("\n".join(lines), max_chars=max_chars)
 
-    def property_memory_packet(
+    def property_learning_packet(
         self,
         property_name,
         form_text="",
-        max_items=MEMORY_PROPERTY_PACKET_MAX_ITEMS,
-        max_chars=7000,
+        max_items=cfg.MEMORY_PROPERTY_PACKET_MAX_ITEMS,
+        max_chars=cfg.MEMORY_PROPERTY_LEARNING_PACKET_MAX_CHARS,
     ):
         prop = str(property_name or "").strip()
         if not prop:
@@ -1256,42 +1539,51 @@ class MemoryManager:
         parts = []
         dependency = PROPERTY_DEPENDENCIES.get(prop, "")
         if dependency:
-            parts.append(f"性质依赖:\n- {prop}: {dependency}")
+            parts.append(f"性质角色:\n- {prop}: {dependency}")
 
-        similar = self.find_similar_failures(form_text, limit=max_items, property_name=prop)
-        if similar:
-            lines = []
-            for record in similar:
-                detail = record.property_status.get(prop) or {}
-                lines.append(
-                    f"- {record.candidate_id}: form={record.form}; status={detail.get('status', 'unknown')}; "
-                    f"note={detail.get('note', '') or record.pruned_reason or '[无]'}"
-                )
-            parts.append("相似候选失败:\n" + "\n".join(lines))
+        similar_failures = self.similar_failure_summary(
+            form_text,
+            property_name=prop,
+            limit=max_items,
+            max_chars=max_chars,
+        )
+        if similar_failures:
+            parts.append(f"相似候选失败:\n{similar_failures}")
 
         failed_props = self.proposition_history_summary(prop, status_filter={"fail"}, max_items=max_items)
         if failed_props:
-            parts.append(f"历史 proposition 失败:\n{failed_props}")
+            parts.append(f"历史失败 proposition:\n{failed_props}")
 
         passed_props = self.proposition_history_summary(prop, status_filter={"pass"}, max_items=max_items)
         if passed_props:
-            parts.append(f"历史 proposition 通过:\n{passed_props}")
+            parts.append(f"历史通过 proposition:\n{passed_props}")
 
-        tool_history = self.tool_request_history_summary(prop, max_items=max_items)
-        if tool_history:
-            parts.append(f"历史 tool request:\n{tool_history}")
-
-        reuse_packet = self.proposition_reuse_packet(prop, form_text=form_text, max_items=max_items, max_chars=max_chars)
-        if reuse_packet:
-            parts.append(f"可复用 proposition 模板:\n{reuse_packet}")
-
-        tool_reuse = self.tool_request_reuse_packet(prop, form_text=form_text, max_items=max_items, max_chars=max_chars)
-        if tool_reuse:
-            parts.append(f"可复用 tool request 模板:\n{tool_reuse}")
+        if prop == "Q5":
+            tool_history = self.tool_request_history_summary(prop, max_items=max_items)
+            if tool_history:
+                parts.append(f"历史验证请求:\n{tool_history}")
 
         return self._truncate_text("\n\n".join(part for part in parts if part), max_chars=max_chars)
 
-    def terminal_report_summary(self, max_items=MEMORY_TERMINAL_REPORT_MAX_ITEMS, max_chars=8000):
+    def property_memory_packet(
+        self,
+        property_name,
+        form_text="",
+        max_items=cfg.MEMORY_PROPERTY_PACKET_MAX_ITEMS,
+        max_chars=cfg.MEMORY_PROPERTY_LEARNING_PACKET_MAX_CHARS,
+    ):
+        return self.property_learning_packet(
+            property_name,
+            form_text=form_text,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
+
+    def terminal_report_summary(
+        self,
+        max_items=cfg.MEMORY_TERMINAL_REPORT_MAX_ITEMS,
+        max_chars=cfg.MEMORY_TERMINAL_REPORT_SUMMARY_MAX_CHARS,
+    ):
         parts = []
         for record in self.recent_terminal_candidates(limit=max_items):
             prop_bits = []
@@ -1309,7 +1601,7 @@ class MemoryManager:
             )
         return self._truncate_text("\n".join(parts).strip() or "暂无终态候选。", max_chars=max_chars)
 
-    def derived_tree_summary(self, max_roots=6, max_chars=6000):
+    def derived_tree_summary(self, max_roots=6, max_chars=cfg.MEMORY_DERIVED_TREE_SUMMARY_MAX_CHARS):
         tree = self.build_derived_tree()
         children = tree["children"]
         nodes = tree["nodes"]
@@ -1321,60 +1613,49 @@ class MemoryManager:
             ]
         )
         lines = []
-        for root in roots[: max(0, int(max_roots)) or len(roots)]:
+        root_limit = self._normalize_limit(max_roots)
+        iterable = roots[:root_limit] if root_limit > 0 else roots
+        for root in iterable:
             child_list = children.get(root) or []
             if child_list:
-                lines.append(f"- {root} -> {', '.join(child_list[:6])}")
+                child_limit = self._normalize_limit(cfg.MEMORY_DERIVED_TREE_CHILDREN_PREVIEW_MAX_ITEMS)
+                rendered_children = child_list[:child_limit] if child_limit > 0 else child_list
+                lines.append(f"- {root} -> {', '.join(rendered_children)}")
             else:
                 lines.append(f"- {root}")
         return self._truncate_text("\n".join(lines).strip() or "暂无派生树。", max_chars=max_chars)
 
-    def summarize_for_prompt(self, max_candidates=MEMORY_SUMMARIZE_MAX_CANDIDATES, max_chars=12000):
-        latest = self.load_latest_candidates()
-        latest.sort(key=lambda item: item.candidate_id)
-        recent = latest[-max(0, int(max_candidates)) :] if max_candidates else latest
+    def search_memory_packet(
+        self,
+        max_candidates=cfg.MEMORY_SUMMARIZE_MAX_CANDIDATES,
+        max_chars=cfg.MEMORY_SEARCH_PACKET_MAX_CHARS,
+    ):
         failure_patterns = self.aggregate_failure_patterns()
 
         parts = []
         if failure_patterns:
             pattern_line = ", ".join(f"{name}:{count}" for name, count in sorted(failure_patterns.items()))
-            parts.append(f"失败模式统计: {pattern_line}")
-        dependency_text = self.dependency_knowledge_summary(max_items=len(DEFAULT_PROPERTIES))
-        if dependency_text:
-            parts.append(f"性质依赖知识:\n{dependency_text}")
-        heuristics = self.heuristic_summary(max_items=6)
+            parts.append(f"近期失败统计: {pattern_line}")
+        heuristics = self.heuristic_summary(max_items=cfg.MEMORY_HEURISTIC_MAX_ITEMS)
         if heuristics:
-            parts.append(f"启发式:\n{heuristics}")
-        tree_summary = self.derived_tree_summary(max_roots=6, max_chars=2000)
-        if tree_summary:
-            parts.append(f"派生树摘要:\n{tree_summary}")
-
-        if not recent:
-            parts.append("暂无历史候选。")
-        else:
-            for record in recent:
-                status_bits = []
-                for prop in DEFAULT_PROPERTIES:
-                    detail = record.property_status.get(prop) or {}
-                    status_bits.append(f"{prop}={detail.get('status', 'untested')}")
-                summary = (
-                    f"- {record.candidate_id}: status={record.status}; form={record.form}; "
-                    f"derived_from={record.derived_from or '[none]'}; "
-                    f"properties={'; '.join(status_bits)}"
-                )
-                proposition_bits = []
-                for prop in DEFAULT_PROPERTIES:
-                    snapshot = record.proposition_snapshot(prop, max_items=MEMORY_REUSE_MAX_ITEMS)
-                    if snapshot:
-                        proposition_bits.append(f"{prop}[{snapshot}]")
-                if proposition_bits:
-                    summary += f"; propositions={'; '.join(proposition_bits)}"
-                if record.pruned_reason:
-                    summary += f"; pruned_reason={record.pruned_reason}"
-                if record.risk_notes:
-                    summary += f"; risk={record.risk_notes}"
-                if record.terminal_decision.get("action"):
-                    summary += f"; decision={record.terminal_decision.get('action')}"
-                parts.append(summary)
-
+            parts.append(f"失败启发式:\n{heuristics}")
+        item_limit = self._normalize_limit(max_candidates)
+        terminal_summary = self.terminal_report_summary(
+            max_items=min(item_limit, cfg.MEMORY_TERMINAL_REPORT_MAX_ITEMS) if item_limit > 0 else 0,
+            max_chars=cfg.MEMORY_SEARCH_PACKET_TERMINAL_SECTION_MAX_CHARS,
+        )
+        if terminal_summary:
+            parts.append(f"最近终态候选:\n{terminal_summary}")
+        candidate_summary = self.recent_candidate_summary(
+            max_items=max_candidates,
+            max_chars=cfg.MEMORY_SEARCH_PACKET_RECENT_CANDIDATES_SECTION_MAX_CHARS,
+        )
+        if candidate_summary:
+            parts.append(f"最近候选轨迹:\n{candidate_summary}")
         return self._truncate_text("\n".join(parts), max_chars=max_chars)
+
+    def summarize_for_prompt(self, max_candidates=cfg.MEMORY_SUMMARIZE_MAX_CANDIDATES, max_chars=cfg.MEMORY_SEARCH_PACKET_MAX_CHARS):
+        return self.search_memory_packet(
+            max_candidates=max_candidates,
+            max_chars=max_chars,
+        )

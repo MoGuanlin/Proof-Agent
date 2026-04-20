@@ -327,6 +327,165 @@ def _safe_float(value):
         return None
 
 
+def _parse_constant_or_default(value, default):
+    if isinstance(value, (int, float)):
+        try:
+            parsed = float(value)
+        except Exception:
+            return float(default)
+        return parsed if math.isfinite(parsed) else float(default)
+
+    text = str(value or "").strip()
+    if not text:
+        return float(default)
+
+    try:
+        evaluator, _ = compile_expression(text, [])
+        parsed = float(evaluator())
+    except Exception:
+        return float(default)
+    return parsed if math.isfinite(parsed) else float(default)
+
+
+def _parse_interval_or_none(raw):
+    candidate = raw
+    if isinstance(candidate, dict):
+        if "interval" in candidate:
+            candidate = candidate.get("interval")
+        elif "domain" in candidate:
+            candidate = candidate.get("domain")
+        elif "bounds" in candidate:
+            candidate = candidate.get("bounds")
+        elif {"lo", "hi"} <= set(candidate):
+            candidate = [candidate.get("lo"), candidate.get("hi")]
+        elif {"min", "max"} <= set(candidate):
+            candidate = [candidate.get("min"), candidate.get("max")]
+        else:
+            return None
+
+    if not isinstance(candidate, (list, tuple)) or len(candidate) != 2:
+        return None
+
+    lo = _parse_constant_or_default(candidate[0], math.nan)
+    hi = _parse_constant_or_default(candidate[1], math.nan)
+    if not math.isfinite(lo) or not math.isfinite(hi):
+        return None
+    return (lo, hi)
+
+
+def _domain_name_matches(entry_name, item_name):
+    lhs = str(entry_name or "").strip()
+    rhs = str(item_name or "").strip()
+    if not lhs or not rhs:
+        return False
+    if lhs == rhs:
+        return True
+    return rhs.startswith(lhs + "_") or rhs.startswith(lhs + "-")
+
+
+def _resolve_item_domain(domain_spec, item, index, fallback_interval):
+    common_interval = _parse_interval_or_none(domain_spec)
+    if common_interval is not None:
+        return common_interval
+
+    item_name = (
+        str(item.get("name", "")).strip()
+        or str(item.get("label", "")).strip()
+        or f"ineq_{index + 1}"
+    )
+
+    if isinstance(domain_spec, dict):
+        for key in (item_name, str(item.get("label", "")).strip(), str(item.get("name", "")).strip(), "default"):
+            if not key:
+                continue
+            interval = _parse_interval_or_none(domain_spec.get(key))
+            if interval is not None:
+                return interval
+        for key, value in domain_spec.items():
+            if _domain_name_matches(key, item_name):
+                interval = _parse_interval_or_none(value)
+                if interval is not None:
+                    return interval
+
+    if isinstance(domain_spec, (list, tuple)):
+        if index < len(domain_spec):
+            interval = _parse_interval_or_none(domain_spec[index])
+            if interval is not None:
+                return interval
+        for entry in domain_spec:
+            if not isinstance(entry, dict):
+                continue
+            if _domain_name_matches(entry.get("name"), item_name) or _domain_name_matches(entry.get("label"), item_name):
+                interval = _parse_interval_or_none(entry)
+                if interval is not None:
+                    return interval
+
+    return fallback_interval
+
+
+def _normalize_numeric_strategy(raw):
+    strategy = str(raw or "").strip().lower()
+    if not strategy:
+        return ""
+
+    aliases = {
+        "branch-bound": "branch_bound",
+        "branch_and_bound": "branch_bound",
+        "interval_branch_and_bound": "branch_bound",
+        "interval_branch_and_bound_with_lipschitz": "branch_bound",
+        "lipschitz_branch_and_bound": "branch_bound",
+        "piyavskii_with_lipschitz": "piyavskii",
+        "interval_piyavskii": "piyavskii",
+    }
+    return aliases.get(strategy, strategy)
+
+
+def _inconclusive_detail(
+    *,
+    normalized_expression,
+    relation,
+    threshold,
+    worst_x,
+    worst_value,
+    sample_max_gap,
+    verified_upper_gap,
+    grid_points,
+    step,
+    local_lipschitz,
+    lipschitz_source,
+    strategy,
+    evaluations,
+    reason,
+    invalid_x=None,
+    invalid_detail="",
+    sample_failures=0,
+):
+    detail = {
+        "label": None,
+        "expression": normalized_expression,
+        "relation_target": _render_relation_target(relation, threshold),
+        "worst_x": worst_x,
+        "worst_value": worst_value,
+        "sample_max_gap": sample_max_gap,
+        "verified_upper_gap": verified_upper_gap,
+        "grid_points": grid_points,
+        "step": step,
+        "lipschitz": local_lipschitz,
+        "lipschitz_source": lipschitz_source,
+        "sample_failures": sample_failures,
+        "pass": False,
+        "status": "inconclusive",
+        "strategy": strategy,
+        "evaluations": evaluations,
+        "reason": reason,
+    }
+    if invalid_x is not None:
+        detail["invalid_x"] = invalid_x
+    if invalid_detail:
+        detail["invalid_detail"] = invalid_detail
+    return detail
+
+
 def _estimate_lipschitz_bound(expression, variable_name, lo, hi, provided_lipschitz=None, derivative_samples=4097):
     if provided_lipschitz is not None:
         return abs(_float_or_default(provided_lipschitz, 0.0)), "provided"
@@ -394,24 +553,74 @@ def _evaluate_grid_case(
     max_sample_x = None
     max_sample_value = None
     failure_count = 0
+    invalid_count = 0
+    invalid_x = None
+    invalid_detail = ""
 
     if values is not None and np is not None:
+        finite_mask = np.isfinite(values)
+        if not np.all(finite_mask):
+            invalid_count = int(np.count_nonzero(~finite_mask))
+            invalid_indices = np.where(~finite_mask)[0]
+            if invalid_indices.size:
+                invalid_x = float(grid[int(invalid_indices[0])])
+                invalid_detail = "vectorized evaluation produced a non-finite value"
+        finite_grid = grid[finite_mask]
+        finite_values = values[finite_mask]
+        if finite_values.size == 0:
+            return _inconclusive_detail(
+                normalized_expression=normalized_expression,
+                relation=relation,
+                threshold=threshold,
+                worst_x=None,
+                worst_value=None,
+                sample_max_gap=None,
+                verified_upper_gap=None,
+                grid_points=grid_points,
+                step=step,
+                local_lipschitz=local_lipschitz,
+                lipschitz_source=lipschitz_source,
+                strategy="grid",
+                evaluations=grid_points,
+                reason="all sampled evaluations were non-finite on the requested domain",
+                invalid_x=invalid_x,
+                invalid_detail=invalid_detail,
+            )
         if relation in {"<", "<="}:
-            gaps = values - threshold
+            gaps = finite_values - threshold
         else:
-            gaps = threshold - values
+            gaps = threshold - finite_values
         idx = int(np.argmax(gaps))
         max_sample_gap = float(gaps[idx])
-        max_sample_x = float(grid[idx])
-        max_sample_value = float(values[idx])
+        max_sample_x = float(finite_grid[idx])
+        max_sample_value = float(finite_values[idx])
         if _relation_is_strict(relation):
             failure_count = int(np.count_nonzero(gaps >= 0.0))
         else:
             failure_count = int(np.count_nonzero(gaps > 0.0))
     else:
         for x in grid:
-            value = evaluator(**{variable_name: x})
+            try:
+                value = evaluator(**{variable_name: x})
+            except Exception as exc:
+                invalid_count += 1
+                if invalid_x is None:
+                    invalid_x = float(x)
+                    invalid_detail = f"evaluation failed: {exc}"
+                continue
+            if not math.isfinite(value):
+                invalid_count += 1
+                if invalid_x is None:
+                    invalid_x = float(x)
+                    invalid_detail = "evaluation produced a non-finite value"
+                continue
             gap = _evaluate_gap(relation, value, threshold)
+            if not math.isfinite(gap):
+                invalid_count += 1
+                if invalid_x is None:
+                    invalid_x = float(x)
+                    invalid_detail = "gap evaluation produced a non-finite value"
+                continue
             if max_sample_gap is None or gap > max_sample_gap:
                 max_sample_gap = gap
                 max_sample_x = x
@@ -419,12 +628,40 @@ def _evaluate_grid_case(
             if _gap_is_violation(relation, gap):
                 failure_count += 1
 
+        if max_sample_gap is None:
+            return _inconclusive_detail(
+                normalized_expression=normalized_expression,
+                relation=relation,
+                threshold=threshold,
+                worst_x=None,
+                worst_value=None,
+                sample_max_gap=None,
+                verified_upper_gap=None,
+                grid_points=grid_points,
+                step=step,
+                local_lipschitz=local_lipschitz,
+                lipschitz_source=lipschitz_source,
+                strategy="grid",
+                evaluations=grid_points,
+                reason="all sampled evaluations were invalid on the requested domain",
+                invalid_x=invalid_x,
+                invalid_detail=invalid_detail,
+            )
+
     verified_upper_gap = max_sample_gap
     if local_lipschitz is not None:
         L = abs(_float_or_default(local_lipschitz, 0.0))
         verified_upper_gap = max_sample_gap + 0.5 * L * step
 
     passed = verified_upper_gap < 0.0 if _relation_is_strict(relation) else verified_upper_gap <= 0.0
+    status = "pass" if passed else "fail"
+    reason = ""
+    if invalid_count > 0 and failure_count == 0:
+        status = "inconclusive"
+        reason = (
+            f"encountered {invalid_count} non-finite/invalid sample(s); "
+            "cannot certify the inequality on the full requested domain"
+        )
     return {
         "label": None,
         "expression": normalized_expression,
@@ -438,10 +675,14 @@ def _evaluate_grid_case(
         "lipschitz": local_lipschitz,
         "lipschitz_source": lipschitz_source,
         "sample_failures": failure_count,
-        "pass": passed,
-        "status": "pass" if passed else "fail",
+        "invalid_samples": invalid_count,
+        "pass": passed and status == "pass",
+        "status": status,
         "strategy": "grid",
         "evaluations": grid_points,
+        "reason": reason,
+        "invalid_x": invalid_x,
+        "invalid_detail": invalid_detail,
     }
 
 
@@ -486,11 +727,37 @@ def _evaluate_branch_bound_case(
     def eval_gap(x):
         nonlocal eval_count
         eval_count += 1
-        value = evaluator(**{variable_name: x})
+        try:
+            value = evaluator(**{variable_name: x})
+        except Exception as exc:
+            return None, None, f"evaluation failed: {exc}"
+        if not math.isfinite(value):
+            return None, None, "evaluation produced a non-finite value"
         gap = _evaluate_gap(relation, value, threshold)
-        return value, gap
+        if not math.isfinite(gap):
+            return None, None, "gap evaluation produced a non-finite value"
+        return value, gap, ""
 
-    f_lo, g_lo = eval_gap(lo)
+    f_lo, g_lo, reason_lo = eval_gap(lo)
+    if reason_lo:
+        return _inconclusive_detail(
+            normalized_expression=normalized_expression,
+            relation=relation,
+            threshold=threshold,
+            worst_x=None,
+            worst_value=None,
+            sample_max_gap=None,
+            verified_upper_gap=None,
+            grid_points=0,
+            step=hi - lo,
+            local_lipschitz=local_lipschitz,
+            lipschitz_source=lipschitz_source,
+            strategy=strategy_name,
+            evaluations=eval_count,
+            reason="endpoint evaluation was invalid; use an open interval or split the domain around the singular point",
+            invalid_x=lo,
+            invalid_detail=reason_lo,
+        )
     if _gap_is_violation(relation, g_lo):
         return {
             "label": None,
@@ -514,7 +781,26 @@ def _evaluate_branch_bound_case(
             "reason": "endpoint violates the target inequality",
         }
 
-    f_hi, g_hi = eval_gap(hi)
+    f_hi, g_hi, reason_hi = eval_gap(hi)
+    if reason_hi:
+        return _inconclusive_detail(
+            normalized_expression=normalized_expression,
+            relation=relation,
+            threshold=threshold,
+            worst_x=lo,
+            worst_value=f_lo,
+            sample_max_gap=g_lo,
+            verified_upper_gap=None,
+            grid_points=0,
+            step=hi - lo,
+            local_lipschitz=local_lipschitz,
+            lipschitz_source=lipschitz_source,
+            strategy=strategy_name,
+            evaluations=eval_count,
+            reason="endpoint evaluation was invalid; use an open interval or split the domain around the singular point",
+            invalid_x=hi,
+            invalid_detail=reason_hi,
+        )
     if _gap_is_violation(relation, g_hi):
         return {
             "label": None,
@@ -638,7 +924,26 @@ def _evaluate_branch_bound_case(
             probe = _piyavskii_probe_point(current["a"], current["b"], current["ga"], current["gb"], L)
         else:
             probe = 0.5 * (current["a"] + current["b"])
-        f_mid, g_mid = eval_gap(probe)
+        f_mid, g_mid, reason_mid = eval_gap(probe)
+        if reason_mid:
+            return _inconclusive_detail(
+                normalized_expression=normalized_expression,
+                relation=relation,
+                threshold=threshold,
+                worst_x=best_sample_x,
+                worst_value=best_sample_value,
+                sample_max_gap=best_sample_gap,
+                verified_upper_gap=upper_gap,
+                grid_points=0,
+                step=width,
+                local_lipschitz=local_lipschitz,
+                lipschitz_source=lipschitz_source,
+                strategy=strategy_name,
+                evaluations=eval_count,
+                reason="interior probe evaluation was invalid; split the domain or rewrite the expression to avoid singular points",
+                invalid_x=probe,
+                invalid_detail=reason_mid,
+            )
         if g_mid > best_sample_gap:
             best_sample_gap = g_mid
             best_sample_x = probe
@@ -714,20 +1019,17 @@ def _evaluate_branch_bound_case(
 def verify_numeric_1d(spec):
     variable_name = str(spec.get("variable", "")).strip() or "x"
     domain = spec.get("domain") or [0.0, 1.0]
-    if not isinstance(domain, (list, tuple)) or len(domain) != 2:
-        raise ValueError("domain must be a length-2 list")
-    lo = _float_or_default(domain[0], 0.0)
-    hi = _float_or_default(domain[1], 1.0)
-    if not lo < hi:
-        raise ValueError("domain lower bound must be < upper bound")
-
     inequalities = list(spec.get("inequalities") or [])
     if not inequalities:
         raise ValueError("inequalities must be a non-empty list")
 
+    common_domain = _parse_interval_or_none(domain)
+    if common_domain is None and not isinstance(domain, (list, tuple, dict)):
+        raise ValueError("domain must be a length-2 list or a per-inequality interval mapping")
+
     points = max(101, _int_or_default(spec.get("grid_points"), 2001))
     global_lipschitz = spec.get("lipschitz")
-    requested_strategy = str(spec.get("strategy", "")).strip().lower()
+    requested_strategy = _normalize_numeric_strategy(spec.get("strategy", ""))
     max_iterations = max(10, _int_or_default(spec.get("max_iterations"), 5000))
     min_width = abs(_float_or_default(spec.get("min_width"), 1e-6))
     tolerance = abs(_float_or_default(spec.get("tolerance"), 1e-9))
@@ -736,10 +1038,23 @@ def verify_numeric_1d(spec):
     details = []
     item_statuses = []
 
-    for item in inequalities:
-        label = str(item.get("label", "")).strip() or f"ineq_{len(details) + 1}"
+    for index, item in enumerate(inequalities):
+        label = (
+            str(item.get("label", "")).strip()
+            or str(item.get("name", "")).strip()
+            or f"ineq_{len(details) + 1}"
+        )
         relation = str(item.get("relation", "<")).strip() or "<"
-        threshold = _float_or_default(item.get("threshold"), 0.0)
+        threshold = _parse_constant_or_default(item.get("threshold"), 0.0)
+        interval = _resolve_item_domain(domain, item, index, common_domain)
+        if interval is None:
+            raise ValueError(
+                "domain must be a length-2 list or a per-inequality interval mapping "
+                f"covering {label}"
+            )
+        lo, hi = interval
+        if not lo < hi:
+            raise ValueError(f"domain lower bound must be < upper bound for {label}")
         evaluator, normalized_expression = compile_expression(item.get("expression", ""), [variable_name])
         estimated_lipschitz, lipschitz_source = _estimate_lipschitz_bound(
             normalized_expression,
@@ -783,6 +1098,7 @@ def verify_numeric_1d(spec):
                 lipschitz_source=lipschitz_source,
             )
         detail["label"] = label
+        detail["domain"] = [lo, hi]
         details.append(detail)
         item_statuses.append(detail.get("status", "inconclusive"))
 

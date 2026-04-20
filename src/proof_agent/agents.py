@@ -4,18 +4,20 @@ import re
 import requests
 
 from .app_config import (
-    AI_HUB_MIXED_API_URL,
     LLM_PROVIDER,
     MODEL_NAME,
+    MODEL_HIDE_REASONING_OUTPUT,
+    MODEL_REASONING_EFFORT,
     PREFER_STREAMING,
     REQUEST_TIMEOUT_SECONDS,
-    REVIEWER_ROLE_OVERRIDES,
-    SILICONFLOW_API_URL,
     _active_api_key,
     _extract_google_text,
     _google_api_url,
+    _openai_compatible_api_url,
+    _openai_compatible_extra_headers,
     _request_proxies,
 )
+from .retry import IncompleteStreamError, with_http_retry
 
 
 class BaseAgent:
@@ -135,6 +137,79 @@ class BaseAgent:
                     chunks.append(str(text))
         return "".join(chunks)
 
+    @staticmethod
+    def _extract_partial_tagged_content(text, tag_name):
+        if not isinstance(text, str):
+            return None
+        safe_tag = BaseAgent._normalize_tag_name(tag_name)
+        opening_matches = list(
+            re.finditer(
+                rf"<{safe_tag}>\s*",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        if not opening_matches:
+            return None
+        start = opening_matches[-1].end()
+        closing_match = re.search(
+            rf"</{safe_tag}>",
+            text[start:],
+            flags=re.IGNORECASE,
+        )
+        end = start + closing_match.start() if closing_match else len(text)
+        candidate = text[start:end].strip()
+        return candidate or None
+
+    @staticmethod
+    def _build_tag_repair_prompt(prompt, safe_tag, content_hint, recovered_content):
+        hint_line = f"\nContent requirements inside the tag: {content_hint}" if content_hint else ""
+        recovered_body = str(recovered_content or "").strip() or "...content..."
+        recovered_block = f"<{safe_tag}>\n{recovered_body}\n</{safe_tag}>"
+        if safe_tag.upper() == "PROPOSITION_PROOF":
+            return (
+                f"Original task:\n{prompt}\n\n"
+                f"Your previous reply for <{safe_tag}> was truncated, malformed, or semantically invalid.\n"
+                "Below is the partial proposition proof recovered from the failed attempt.\n"
+                "Continue and repair this exact proof draft instead of regenerating from scratch.\n"
+                "Do not switch to reviewer mode. Do not output [PASS] or [REJECT].\n"
+                "Preserve the fixed six-section skeleton exactly:\n"
+                "## Assumptions\n"
+                "## Claim\n"
+                "## Derivation\n"
+                "## Boundary Cases\n"
+                "## Verification Needs\n"
+                "## Conclusion\n"
+                "Keep any still-correct existing proof text, complete cut-off formulas or sentences, and return the full revised proof only.\n\n"
+                f"Recovered partial content:\n{recovered_block}\n\n"
+                f"Please output exactly one complete and closed <{safe_tag}> tag, with no content outside the tag."
+                f"{hint_line}"
+            )
+        return (
+            f"Original task:\n{prompt}\n\n"
+            f"Your previous reply did not provide parseable content inside <{safe_tag}>.\n"
+            "Below is the recovered partial content from the failed attempt. Repair it into one complete tagged answer.\n"
+            f"Recovered partial content:\n{recovered_block}\n\n"
+            f"Please output exactly one complete and closed <{safe_tag}> tag, with no content outside the tag."
+            f"{hint_line}\n"
+            "If this is a review result, the first line inside the tag must be exactly [PASS] or [REJECT]."
+        )
+
+    @staticmethod
+    def _reasoning_effort_value():
+        effort = str(MODEL_REASONING_EFFORT or "").strip()
+        return effort or None
+
+    @staticmethod
+    def _stream_delta_text(choice):
+        delta = (choice or {}).get("delta") or {}
+        text = delta.get("content")
+        if text is not None:
+            return text
+        if MODEL_HIDE_REASONING_OUTPUT:
+            return ""
+        return delta.get("reasoning_content") or ""
+
     def _headers_and_payload(self, prompt):
         api_key = _active_api_key()
         if not api_key:
@@ -142,6 +217,10 @@ class BaseAgent:
                 missing_key = "GEMINI_API_KEY/GOOGLE_API_KEY"
             elif LLM_PROVIDER == "ai_hub_mixed":
                 missing_key = "AI_HUB_MIXED_MODEL_API_KEY"
+            elif LLM_PROVIDER == "openai":
+                missing_key = "OPENAI_API_KEY"
+            elif LLM_PROVIDER == "openrouter":
+                missing_key = "OPENROUTER_API_KEY"
             else:
                 missing_key = "SILICONFLOW_API_KEY"
             raise RuntimeError(f"missing env {missing_key}")
@@ -159,6 +238,7 @@ class BaseAgent:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
+        headers.update(_openai_compatible_extra_headers())
         payload = {
             "model": MODEL_NAME,
             "messages": [
@@ -167,8 +247,13 @@ class BaseAgent:
             ],
             "temperature": self.temp,
         }
+        if LLM_PROVIDER == "openai":
+            effort = self._reasoning_effort_value()
+            if effort:
+                payload["reasoning_effort"] = effort
         return headers, payload
 
+    @with_http_retry("stream_google")
     def _stream_google(self, payload, print_stream):
         response = requests.post(
             _google_api_url(stream=True),
@@ -208,12 +293,12 @@ class BaseAgent:
             raise RuntimeError("empty streaming response")
         return result
 
+    @with_http_retry("stream_openai")
     def _stream_openai_compatible(self, headers, payload, print_stream):
         stream_payload = dict(payload)
         stream_payload["stream"] = True
-        url = AI_HUB_MIXED_API_URL if LLM_PROVIDER == "ai_hub_mixed" else SILICONFLOW_API_URL
         response = requests.post(
-            url,
+            _openai_compatible_api_url(),
             headers=headers,
             json=stream_payload,
             stream=True,
@@ -223,6 +308,7 @@ class BaseAgent:
         response.raise_for_status()
         pieces = []
         started = False
+        saw_done = False
         for raw_line in response.iter_lines(decode_unicode=False):
             if not raw_line:
                 continue
@@ -235,11 +321,11 @@ class BaseAgent:
                 continue
             data = line[5:].strip()
             if data == "[DONE]":
+                saw_done = True
                 break
             event = json.loads(data)
             choice = event["choices"][0]
-            delta = choice.get("delta") or {}
-            text = delta.get("content") or delta.get("reasoning_content")
+            text = self._stream_delta_text(choice)
             if not text:
                 text = (choice.get("message") or {}).get("content", "")
             text = self._merge_openai_content(text)
@@ -254,6 +340,11 @@ class BaseAgent:
         if print_stream and started:
             print("")
         result = "".join(pieces).strip()
+        if not saw_done:
+            raise IncompleteStreamError(
+                f"incomplete streaming response without [DONE] (received_chars={len(result)})",
+                partial_text=result,
+            )
         if not result:
             raise RuntimeError("empty streaming response")
         return result
@@ -263,6 +354,7 @@ class BaseAgent:
             return self._stream_google(payload, print_stream)
         return self._stream_openai_compatible(headers, payload, print_stream)
 
+    @with_http_retry("non_stream_llm")
     def _call_non_stream(self, headers, payload):
         if LLM_PROVIDER == "google":
             response = requests.post(
@@ -275,9 +367,8 @@ class BaseAgent:
             response.raise_for_status()
             result = _extract_google_text(response.json())
         else:
-            url = AI_HUB_MIXED_API_URL if LLM_PROVIDER == "ai_hub_mixed" else SILICONFLOW_API_URL
             response = requests.post(
-                url,
+                _openai_compatible_api_url(),
                 headers=headers,
                 json=payload,
                 timeout=REQUEST_TIMEOUT_SECONDS,
@@ -324,53 +415,101 @@ class BaseAgent:
             "Make sure the tag is complete and properly closed."
             f"{hint_line}"
         )
-        raw = self.call_llm(wrapped_prompt, stream=stream, print_stream=print_stream)
-        extracted = self._extract_tagged_content(raw, safe_tag)
-        if extracted:
-            return extracted
+        invalid_reasons = []
+        raw = ""
+        repair_seed = ""
+        initial_stream_complete = True
 
-        extracted = self._extract_json_fallback(raw, content_hint=content_hint)
-        if extracted:
-            print(
-                f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback",
-                flush=True,
-            )
-            return extracted
-
-        if safe_tag.upper() == "REVIEW_RESULT":
-            verdict_text = ReviewerAgent._extract_fulltext_reviewer_result(raw)
-            if verdict_text:
+        def _maybe_accept(candidate_text, stage_label, allow_return=True, success_message=""):
+            if not candidate_text:
+                return None
+            if not allow_return:
+                invalid_reasons.append(f"{stage_label}: stream ended before completion marker")
                 print(
-                    f"[{self.name}] recovered missing <{safe_tag}> via full-text verdict fallback",
+                    f"[{self.name}] rejected <{safe_tag}> {stage_label}: incomplete stream",
                     flush=True,
                 )
-                return verdict_text
+                return None
+            if success_message:
+                print(success_message, flush=True)
+            return candidate_text
 
-        repair_prompt = (
-            f"Your previous reply did not provide parseable content inside <{safe_tag}>.\n"
-            f"Please output exactly one complete and closed <{safe_tag}> tag, with no content outside the tag.\n"
-            f"<{safe_tag}>\n"
-            "...content...\n"
-            f"</{safe_tag}>\n"
-            f"{hint_line}\n"
-            "If this is a review result, the first line inside the tag must be exactly [PASS] or [REJECT]."
-        )
-        repair_raw = self.call_llm(repair_prompt, stream=stream, print_stream=print_stream)
-        extracted = self._extract_tagged_content(repair_raw, safe_tag)
-        if extracted:
+        try:
+            raw = self.call_llm(wrapped_prompt, stream=stream, print_stream=print_stream)
+        except IncompleteStreamError as exc:
+            raw = str(exc.partial_text or "")
+            repair_seed = self._extract_partial_tagged_content(raw, safe_tag) or raw.strip()
+            initial_stream_complete = False
+            invalid_reasons.append(f"initial stream incomplete: {exc}")
             print(
-                f"[{self.name}] recovered missing <{safe_tag}> via format-repair retry",
+                f"[{self.name}] incomplete stream for <{safe_tag}>; attempting repair",
                 flush=True,
             )
-            return extracted
+
+        if initial_stream_complete:
+            extracted = self._extract_tagged_content(raw, safe_tag)
+            accepted = _maybe_accept(extracted, "initial tagged content")
+            if accepted:
+                return accepted
+            if extracted:
+                repair_seed = extracted
+
+            extracted = self._extract_json_fallback(raw, content_hint=content_hint)
+            accepted = _maybe_accept(
+                extracted,
+                "initial JSON fallback",
+                success_message=f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback",
+            )
+            if accepted:
+                return accepted
+            if extracted and not repair_seed:
+                repair_seed = extracted
+
+            if safe_tag.upper() == "REVIEW_RESULT":
+                verdict_text = ReviewerAgent._extract_fulltext_reviewer_result(raw)
+                if verdict_text:
+                    print(
+                        f"[{self.name}] recovered missing <{safe_tag}> via full-text verdict fallback",
+                        flush=True,
+                    )
+                    return verdict_text
+
+        if not repair_seed:
+            repair_seed = self._extract_partial_tagged_content(raw, safe_tag) or str(raw or "").strip()
+
+        repair_prompt = self._build_tag_repair_prompt(prompt, safe_tag, content_hint, repair_seed)
+        repair_raw = ""
+        repair_stream_complete = True
+        try:
+            repair_raw = self.call_llm(repair_prompt, stream=stream, print_stream=print_stream)
+        except IncompleteStreamError as exc:
+            repair_raw = str(exc.partial_text or "")
+            repair_stream_complete = False
+            invalid_reasons.append(f"repair stream incomplete: {exc}")
+            print(
+                f"[{self.name}] incomplete repair stream for <{safe_tag}>",
+                flush=True,
+            )
+
+        extracted = self._extract_tagged_content(repair_raw, safe_tag)
+        accepted = _maybe_accept(
+            extracted,
+            "format-repair retry",
+            allow_return=repair_stream_complete,
+            success_message=f"[{self.name}] recovered missing <{safe_tag}> via format-repair retry",
+        )
+        if accepted:
+            return accepted
 
         extracted = self._extract_json_fallback(repair_raw, content_hint=content_hint)
-        if extracted:
-            print(
-                f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback after retry",
-                flush=True,
-            )
-            return extracted
+        accepted = _maybe_accept(
+            extracted,
+            "JSON fallback after retry",
+            allow_return=repair_stream_complete,
+            success_message=f"[{self.name}] recovered missing <{safe_tag}> via JSON fallback after retry",
+        )
+        if accepted:
+            return accepted
 
         if safe_tag.upper() == "REVIEW_RESULT":
             verdict_text = ReviewerAgent._extract_fulltext_reviewer_result(repair_raw)
@@ -381,6 +520,8 @@ class BaseAgent:
                 )
                 return verdict_text
 
+        if invalid_reasons:
+            raise RuntimeError(f"[{self.name}] invalid <{safe_tag}> after repair: {invalid_reasons[-1]}")
         raise RuntimeError(f"[{self.name}] missing non-empty <{safe_tag}>")
 
 
