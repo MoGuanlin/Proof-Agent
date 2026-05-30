@@ -69,6 +69,7 @@ class LiteratureRAG:
         overlap_chars=240,
         vector_dim=LITERATURE_RAG_VECTOR_DIM,
         embedding_model=LITERATURE_RAG_EMBEDDING_MODEL,
+        rebuild=True,
     ):
         self.db_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -84,7 +85,11 @@ class LiteratureRAG:
         self.collection_name = self._build_collection_name()
         self._qdrant = self._create_qdrant_client()
         self._voyage = self._create_voyage_client()
-        self._load_or_rebuild_store()
+        # rebuild=False: read-only retrieval against an already-built collection.
+        # Skips load/rebuild so an empty `documents` list never triggers
+        # _create_collection (which would DELETE the existing collection).
+        if rebuild:
+            self._load_or_rebuild_store()
 
     @staticmethod
     def _log(message):

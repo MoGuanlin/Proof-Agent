@@ -61,3 +61,11 @@ artifacts/prompt_snapshots/
 # Optional: uncomment these for a code-only/public repo
 data/papers/
 artifacts/reports/
+
+# Claude Code session / plan files
+.claude/
+
+# Deprecated archive — keep code + design docs only; exclude historical run outputs & large binaries
+deprecated/artifacts/
+deprecated/docs/*.pdf
+deprecated/docs/*.pptx

@@ -21,10 +21,15 @@ from .retry import IncompleteStreamError, with_http_retry
 
 
 class BaseAgent:
-    def __init__(self, name, system_role="", temperature=0.7):
+    def __init__(self, name, system_role="", temperature=0.7, attached_file_uris=None,
+                 literature_packet=None):
         self.name = name
         self.role = system_role
         self.temp = temperature
+        self.attached_file_uris = list(attached_file_uris or [])
+        # Text literature packet prepended to the user prompt for OpenAI-compatible
+        # providers (google uses attached_file_uris instead). Empty => no injection.
+        self.literature_packet = str(literature_packet or "").strip()
 
     @staticmethod
     def _normalize_tag_name(tag_name):
@@ -226,24 +231,42 @@ class BaseAgent:
             raise RuntimeError(f"missing env {missing_key}")
 
         if LLM_PROVIDER == "google":
+            user_parts = []
+            for uri, mime in self.attached_file_uris:
+                user_parts.append({"fileData": {"fileUri": uri, "mimeType": mime or "application/pdf"}})
+            user_parts.append({"text": prompt})
             headers = {"Content-Type": "application/json"}
             payload = {
                 "systemInstruction": {"parts": [{"text": self.role}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "contents": [{"role": "user", "parts": user_parts}],
                 "generationConfig": {"temperature": self.temp},
             }
             return headers, payload
+
+        if self.attached_file_uris:
+            raise NotImplementedError(
+                f"attached_file_uris is google-only in Phase 1; current LLM_PROVIDER={LLM_PROVIDER!r}"
+            )
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
         headers.update(_openai_compatible_extra_headers())
+        user_content = prompt
+        if self.literature_packet:
+            user_content = (
+                "Reference literature (retrieved from local RAG; relevant excerpts only, "
+                "do not assume completeness):\n"
+                f"{self.literature_packet}\n\n"
+                "----- end reference literature -----\n\n"
+                f"{prompt}"
+            )
         payload = {
             "model": MODEL_NAME,
             "messages": [
                 {"role": "system", "content": self.role},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ],
             "temperature": self.temp,
         }

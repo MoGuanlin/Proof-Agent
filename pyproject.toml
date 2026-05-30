@@ -23,7 +23,8 @@ rag = [
 ]
 
 [project.scripts]
-proof-agent-run = "proof_agent.cli.main:main"
+# proof-agent-run was the strict-pipeline entry; archived under deprecated/src_strict/proof_agent/cli/main.py
+proof-agent-relaxed = "proof_agent.relaxed.cli:main"
 proof-agent-memory = "proof_agent.cli.memory_admin:main"
 proof-agent-memory-web = "proof_agent.cli.memory_admin_web:main"
 proof-agent-convert-pdf = "proof_agent.cli.convert_pdf_to_markdown:main"

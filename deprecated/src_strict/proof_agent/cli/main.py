@@ -1,6 +1,6 @@
 import os
 
-from proof_agent.app_config import (
+from upper_bound_agent.src.proof_agent.app_config import (
     LITERATURE_MAX_CHARS,
     LLM_PROVIDER,
     MODEL_NAME,
@@ -8,10 +8,10 @@ from proof_agent.app_config import (
     REQUEST_TIMEOUT_SECONDS,
     _active_api_key,
 )
-from proof_agent.logging_setup import configure_logging
-from proof_agent.paths import PRIMARY_PAPER_PATH
-from proof_agent.reporting import _build_report_filename
-from proof_agent.research_system import AutonomousResearchSystem
+from upper_bound_agent.src.proof_agent.logging_setup import configure_logging
+from upper_bound_agent.src.proof_agent.paths import PRIMARY_PAPER_PATH
+from upper_bound_agent.src.proof_agent.reporting import _build_report_filename
+from upper_bound_agent.src.proof_agent.research_system import AutonomousResearchSystem
 
 
 PDF_FILE = str(PRIMARY_PAPER_PATH)
